@@ -136,7 +136,7 @@ export VOICE_TTS="edge"
 | 人名、专有名词识别错误 | 免费模型的已知局限；可替换 STT 服务 |
 | 想在 Mac 上运行 | 不是一键安装：Apple Silicon 参考 [docs/SETUP_MACOS.md](docs/SETUP_MACOS.md)，或使用 Docker（[docs/SETUP_DOCKER.md](docs/SETUP_DOCKER.md)）；已有用户在 Mac mini 上跑通。Release 中的预编译包仅支持 Linux x86_64 |
 | Mac 上 libInit 报 259804（SRTP 初始化失败） | flat_namespace 使 OpenSSL 符号绑定到系统 LibreSSL；改用 Docker，或编译 SWIG 绑定时加 `-std=c++11`。不要关闭 SRTP，否则对方返回 488 |
-| 能接入 Aru 吗 | Aru Host 装在 VPS 上并以 Claude Code 为驱动时，在该机 Claude Code 中安装本插件应可使用（未实测）；Aru App 支持远程 MCP，远程版完成后可直接添加。打电话的服务仍需运行在 VPS 或自己的电脑上 |
+| 能接入自建前端吗 | 前端的后端若在 VPS 上以 Claude Code 等运行，在该机安装本插件应可使用（未实测）；前端若支持远程 MCP，远程版完成后可直接添加。打电话的服务仍需运行在 VPS 或自己的电脑上 |
 
 ## 感谢
 

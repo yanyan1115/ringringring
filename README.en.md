@@ -136,7 +136,7 @@ export VOICE_TTS="edge"
 | Names and proper nouns misrecognized | A known limitation of the free model; you can swap the STT service |
 | Running on a Mac | Not a one-click install: on Apple Silicon see [docs/SETUP_MACOS.md](docs/SETUP_MACOS.md), or use Docker ([docs/SETUP_DOCKER.md](docs/SETUP_DOCKER.md)); a user has it running on a Mac mini. The prebuilt package in Releases is Linux x86_64 only |
 | libInit fails with 259804 on a Mac (SRTP init) | flat_namespace binds OpenSSL symbols to the system LibreSSL; use Docker, or build the SWIG bindings with `-std=c++11`. Don't disable SRTP, or the other side returns 488 |
-| Does it work with Aru? | With Aru Host on a VPS and Claude Code as its driver, installing this plugin in that Claude Code should work (untested); the Aru app supports remote MCP, so once the remote version is ready you can add it directly. The calling service still has to run on a VPS or your own computer |
+| Does it work with a self-built frontend? | If the frontend's backend runs Claude Code or similar on a VPS, installing this plugin there should work (untested); if the frontend supports remote MCP, you can add it directly once the remote version is ready. The calling service still has to run on a VPS or your own computer |
 
 ## Thanks
 
