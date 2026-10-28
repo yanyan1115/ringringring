@@ -14,6 +14,8 @@
 
 无需购买号码，无按分钟计费；语音识别与语音合成均使用免费额度。仅需一台已在运行 AI 的 Linux 服务器。iPhone 熄屏或 Linphone 处于后台时同样可以来电。
 
+如果对你有帮助，欢迎点个 Star 鼓励作者～⭐
+
 ## 功能
 
 - **双向语音通话**：AI 拨打手机，接通后进行多轮对话。用户语音经识别转为文字交给 AI，AI 的回复经合成后播放。
@@ -28,7 +30,7 @@
 |---|---|---|
 | Linux 服务器 | x86_64，Python 3.11；即运行 Claude Code／OpenCode 的主机 | 已有 |
 | Linphone | 手机端 App（App Store／各应用商店） | 免费 |
-| Linphone 账号 ×2 | 手机与 AI 各一个（App 内注册或 subscribe.linphone.org） | 免费 |
+| Linphone 账号 ×2 | 手机与 AI 各一个（App 内注册或 subscribe.linphone.org）；AI 账号只需注册，程序只向外拨号、不向服务器登记 | 免费 |
 | Groq API key | 语音识别（console.groq.com） | 免费额度 |
 
 ### 云端 CC／官方 App 能用吗
@@ -121,6 +123,8 @@ export VOICE_TTS="edge"
 1. 安装后先在前台接听一次，此后熄屏或后台状态均可来电。
 2. 设置 → 辅助功能 → 触控 → 开启「防止锁定后结束通话」，避免通话中误触锁屏键挂断。
 3. 不要将 AI 的号码存入通讯录，否则来电显示为通讯录名称而非 `VOICE_DISPLAY_NAME`。
+4. 通话记录里找不到 AI 的来电：记录在「未知来电」里。设置 → App → 电话 → 来电过滤 → 关闭「未知来电」即可。
+5. 锁屏时接听是系统原生通话界面，解锁状态下接听会进入 Linphone 界面；此时按侧边键锁屏即切到原生界面，通话不中断（需开启第 2 条）。
 
 ## 常见问题
 
@@ -130,6 +134,9 @@ export VOICE_TTS="edge"
 | 返回 LINE BUSY | 同一主机上另一 AI 入口正在通话；无需重复拨号 |
 | 转写延迟高或为空 | 检查 STT key 与额度 |
 | 人名、专有名词识别错误 | 免费模型的已知局限；可替换 STT 服务 |
+| 想在 Mac 上运行 | 不是一键安装：Apple Silicon 参考 [docs/SETUP_MACOS.md](docs/SETUP_MACOS.md)，或使用 Docker（[docs/SETUP_DOCKER.md](docs/SETUP_DOCKER.md)）；已有用户在 Mac mini 上跑通。Release 中的预编译包仅支持 Linux x86_64 |
+| Mac 上 libInit 报 259804（SRTP 初始化失败） | flat_namespace 使 OpenSSL 符号绑定到系统 LibreSSL；改用 Docker，或编译 SWIG 绑定时加 `-std=c++11`。不要关闭 SRTP，否则对方返回 488 |
+| 能接入 Aru 吗 | Aru Host 装在 VPS 上并以 Claude Code 为驱动时，在该机 Claude Code 中安装本插件应可使用（未实测）；Aru App 支持远程 MCP，远程版完成后可直接添加。打电话的服务仍需运行在 VPS 或自己的电脑上 |
 
 ## 感谢
 

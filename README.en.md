@@ -14,6 +14,8 @@
 
 No phone number to buy, no per-minute billing; speech recognition and speech synthesis both run on free tiers. All you need is a Linux server that is already running your AI. Calls come through even when the iPhone screen is off or Linphone is in the background.
 
+If this helps you, a Star would mean a lot to the author ⭐
+
 ## Features
 
 - **Two-way voice calls**: the AI calls your phone and holds a multi-turn conversation once you pick up. Your speech is transcribed to text for the AI, and the AI's reply is synthesized and played back.
@@ -28,7 +30,7 @@ No phone number to buy, no per-minute billing; speech recognition and speech syn
 |---|---|---|
 | Linux server | x86_64, Python 3.11; the host that runs Claude Code / OpenCode | Already have |
 | Linphone | Phone app (App Store / app stores) | Free |
-| Linphone accounts ×2 | One for the phone, one for the AI (register in the app or at subscribe.linphone.org) | Free |
+| Linphone accounts ×2 | One for the phone, one for the AI (register in the app or at subscribe.linphone.org); the AI account only needs to exist, the program only dials out and never registers with the server | Free |
 | Groq API key | Speech recognition (console.groq.com) | Free tier |
 
 ### Does it work in cloud Claude Code or the official Claude app?
@@ -121,6 +123,8 @@ export VOICE_TTS="edge"
 1. After installing, answer one call with the app in the foreground; after that, calls come through with the screen off or the app in the background.
 2. Settings → Accessibility → Touch → turn on "Prevent Lock to End Call", so an accidental press of the lock button doesn't hang up.
 3. Don't save the AI's number in Contacts, otherwise the caller ID shows the contact name instead of `VOICE_DISPLAY_NAME`.
+4. Can't find the AI's calls in Recents: they are filed under Unknown Callers. Settings → Apps → Phone → Call Filtering → turn off "Unknown Callers".
+5. Answering on the lock screen gives the native call screen; answering while unlocked opens Linphone. Press the side button to lock and you switch to the native screen without hanging up (needs item 2).
 
 ## FAQ
 
@@ -130,6 +134,9 @@ export VOICE_TTS="edge"
 | Returns LINE BUSY | Another AI entry point on the same host is on a call; no need to redial |
 | Transcription slow or empty | Check the STT key and quota |
 | Names and proper nouns misrecognized | A known limitation of the free model; you can swap the STT service |
+| Running on a Mac | Not a one-click install: on Apple Silicon see [docs/SETUP_MACOS.md](docs/SETUP_MACOS.md), or use Docker ([docs/SETUP_DOCKER.md](docs/SETUP_DOCKER.md)); a user has it running on a Mac mini. The prebuilt package in Releases is Linux x86_64 only |
+| libInit fails with 259804 on a Mac (SRTP init) | flat_namespace binds OpenSSL symbols to the system LibreSSL; use Docker, or build the SWIG bindings with `-std=c++11`. Don't disable SRTP, or the other side returns 488 |
+| Does it work with Aru? | With Aru Host on a VPS and Claude Code as its driver, installing this plugin in that Claude Code should work (untested); the Aru app supports remote MCP, so once the remote version is ready you can add it directly. The calling service still has to run on a VPS or your own computer |
 
 ## Thanks
 
