@@ -76,6 +76,7 @@ export VOICE_SIP_CALLEE="sip:<phone account>@sip.linphone.org"
 export VOICE_DISPLAY_NAME="Claude"                   # caller ID name (some phones don't show emoji)
 export VOICE_STT_KEY="<Groq key>"                    # or point VOICE_STT_ENV_FILE at a separate file
 export VOICE_STT_LANG="zh"
+export VOICE_STUN="stun.linphone.org:3478"            # lets audio cross NAT; the plugin fills this in by default
 ```
 
 ### Network
@@ -137,6 +138,17 @@ export VOICE_TTS="edge"
 | Running on a Mac | Not a one-click install: on Apple Silicon see [docs/SETUP_MACOS.md](docs/SETUP_MACOS.md), or use Docker ([docs/SETUP_DOCKER.md](docs/SETUP_DOCKER.md)); a user has it running on a Mac mini. The prebuilt package in Releases is Linux x86_64 only |
 | libInit fails with 259804 on a Mac (SRTP init) | flat_namespace binds OpenSSL symbols to the system LibreSSL; use Docker, or build the SWIG bindings with `-std=c++11`. Don't disable SRTP, or the other side returns 488 |
 | Does it work with a self-built frontend? | If the frontend's backend runs Claude Code or similar on a VPS, installing this plugin there should work (untested); if the frontend supports remote MCP, you can add it directly once the remote version is ready. The calling service still has to run on a VPS or your own computer |
+
+### If you write or change the pjsua2 config yourself
+
+The plugin already sets all of this. You only run into these when writing your own code or a `voice.env` by hand.
+
+| Symptom | Cause and fix |
+|---|---|
+| Registration times out, or it succeeds and then dialing goes nowhere | An account that only dials out should not register: `acfg.regConfig.registrarUri = ""` |
+| Dialing does nothing and the logs show no reason | Create a TLS transport first, and include the transport in the proxy: `acfg.sipConfig.proxies.append("sip:sip.linphone.org;transport=tls")` |
+| The process exits right after `makeCall()` with code 134, no exception or stack trace (reported by a user) | Set SRTP on the account's media config: `acfg.mediaConfig.srtpUse = pj.PJMEDIA_SRTP_MANDATORY`. `EpConfig` and `TransportConfig` have no such setting |
+| The call connects and rings, but neither side hears anything, and the SDP `c=` line shows a private address like `192.168.x.x` | STUN is missing. In a hand-written `voice.env`, add `export VOICE_STUN="stun.linphone.org:3478"`; in your own code, use `epCfg.uaConfig.stunServer.append("stun.linphone.org:3478")` |
 
 ## Thanks
 

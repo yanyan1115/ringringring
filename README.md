@@ -76,6 +76,7 @@ export VOICE_SIP_CALLEE="sip:<手机账号>@sip.linphone.org"
 export VOICE_DISPLAY_NAME="Claude"                   # 来电显示名称（部分手机不显示 emoji）
 export VOICE_STT_KEY="<Groq key>"                    # 或以 VOICE_STT_ENV_FILE 指向单独的文件
 export VOICE_STT_LANG="zh"
+export VOICE_STUN="stun.linphone.org:3478"            # 让音频穿过 NAT；插件安装时已默认填好
 ```
 
 ### 网络
@@ -137,6 +138,17 @@ export VOICE_TTS="edge"
 | 想在 Mac 上运行 | 不是一键安装：Apple Silicon 参考 [docs/SETUP_MACOS.md](docs/SETUP_MACOS.md)，或使用 Docker（[docs/SETUP_DOCKER.md](docs/SETUP_DOCKER.md)）；已有用户在 Mac mini 上跑通。Release 中的预编译包仅支持 Linux x86_64 |
 | Mac 上 libInit 报 259804（SRTP 初始化失败） | flat_namespace 使 OpenSSL 符号绑定到系统 LibreSSL；改用 Docker，或编译 SWIG 绑定时加 `-std=c++11`。不要关闭 SRTP，否则对方返回 488 |
 | 能接入自建前端吗 | 前端的后端若在 VPS 上以 Claude Code 等运行，在该机安装本插件应可使用（未实测）；前端若支持远程 MCP，远程版完成后可直接添加。打电话的服务仍需运行在 VPS 或自己的电脑上 |
+
+### 自己写或改 pjsua2 配置时
+
+用本插件默认已配好，下面几条在自己写代码、手写 `voice.env` 时才会遇到。
+
+| 现象 | 原因与处理 |
+|---|---|
+| 注册一直超时，或注册成功后拨号没有下文 | 只向外拨号的账号不要注册：`acfg.regConfig.registrarUri = ""` |
+| 拨号没反应，日志也看不出原因 | 先创建 TLS transport，proxy 要带 transport：`acfg.sipConfig.proxies.append("sip:sip.linphone.org;transport=tls")` |
+| `makeCall()` 后进程直接退出，退出码 134，没有异常和堆栈（有用户遇到） | SRTP 设在账号的媒体配置上：`acfg.mediaConfig.srtpUse = pj.PJMEDIA_SRTP_MANDATORY`。`EpConfig` 和 `TransportConfig` 上没有这一项 |
+| 能接通、有回铃，但双方都听不见，SDP 的 `c=` 行是 `192.168.x.x` 这样的内网地址 | 没配 STUN。手写 `voice.env` 时加 `export VOICE_STUN="stun.linphone.org:3478"`；自己写代码时用 `epCfg.uaConfig.stunServer.append("stun.linphone.org:3478")` |
 
 ## 感谢
 
