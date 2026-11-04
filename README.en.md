@@ -83,6 +83,8 @@ export VOICE_STUN="stun.linphone.org:3478"            # lets audio cross NAT; th
 
 No ports need to be opened: the server sends audio outbound first and uses STUN to traverse NAT. In our test, calls still worked both ways with inbound UDP 4000-4100 denied in the security group. If there is no sound after the call connects, first make sure Linphone is in the foreground; if there is still no sound, try opening UDP 4000-4100 (RTP audio) in the firewall or security group.
 
+If the call connects but neither side hears anything, and the server keeps sending audio without receiving a single packet back, the phone is most likely on a proxy or VPN that does not forward UDP (common for users in mainland China). Turn the proxy off and call again; if you need the proxy, switch to one that forwards UDP, or relay the call audio through your server. A relay adds an extra hop, so expect somewhat higher latency.
+
 ## Connecting your AI
 
 **Claude Code**
