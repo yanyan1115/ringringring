@@ -168,6 +168,8 @@ export VOICE_TTS="edge"
 
 ### HTTPS 远程 MCP（OAuth）
 
+适配 Claude、Gemini、ChatGPT 的 APP/网页端。
+
 给 Gemini 网页版、ChatGPT 等只能连 HTTPS 远程连接器的 AI 用：`plugin-inbound/bin/run_remote.sh`（即 `remote_http.py`）在你的主机上以 HTTPS 远程 MCP 方式提供 `dial`、`talk`、`quiet_listen`、`hang_up`（只打出去，没有接听；只回文字，不传原声）。认证是 OAuth（动态注册、PKCE，外加一个"连接口令"页面：连接时输入你设的口令）。
 
 做法：让服务只监听 `127.0.0.1`，用 Cloudflare 隧道（或任意 HTTPS 反代）把一个域名转发过来；设置 `MCP_OAUTH_ENABLED=1`、`MCP_OAUTH_ISSUER_URL`、`MCP_OAUTH_CONNECT_SECRET`（口令，自己保管）、可选 `MCP_ALLOWED_HOSTS`。OAuth 令牌默认存在 `~/.local/share/ringringring/oauth/`。未开 OAuth 时，服务拒绝监听非本机地址。一键安装脚本在计划中，目前需要手动配置。

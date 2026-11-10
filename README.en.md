@@ -168,6 +168,8 @@ You can run just one layer: a Groq key alone or an ElevenLabs key alone both wor
 
 ### HTTPS remote MCP with OAuth
 
+Works with the Claude, Gemini and ChatGPT apps and websites.
+
 For AIs that can only use HTTPS remote connectors, such as the Gemini web app or ChatGPT: `plugin-inbound/bin/run_remote.sh` (that is, `remote_http.py`) serves `dial`, `talk`, `quiet_listen` and `hang_up` as a remote MCP on your own host. It is dial-out only (no answering) and returns text only, never raw audio. Authentication is OAuth (dynamic client registration, PKCE, plus a "connection passphrase" page where you type the passphrase you chose).
 
 Setup: keep the service on `127.0.0.1` and forward a domain to it with a Cloudflare Tunnel (or any HTTPS reverse proxy); set `MCP_OAUTH_ENABLED=1`, `MCP_OAUTH_ISSUER_URL`, `MCP_OAUTH_CONNECT_SECRET` (the passphrase, keep it secret) and optionally `MCP_ALLOWED_HOSTS`. OAuth tokens are stored under `~/.local/share/ringringring/oauth/` by default. Without OAuth the service refuses to listen on anything but loopback. A one-click installer is planned; for now this is manual.
