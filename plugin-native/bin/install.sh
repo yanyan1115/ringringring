@@ -99,7 +99,10 @@ rm -rf "$PREFIX/pjsua2"; mv "$top" "$PREFIX/pjsua2"
 
 # --- app code ----------------------------------------------------------------------
 rm -rf "$PREFIX/app"; mkdir -p "$PREFIX/app/tools"
-for f in voice_mcp.py voice_agent.py privacy.py platform_compat.py aec.py; do
+# sound_events.py is imported at top level by voice_agent.py: it must be in this list.
+# The worker/server pair is optional (experimental sound events) but harmless to ship.
+for f in voice_mcp.py voice_agent.py privacy.py platform_compat.py aec.py \
+         sound_events.py; do
   [ -f "$SRC/$f" ] && cp "$SRC/$f" "$PREFIX/app/"
 done
 cp "$SRC/tools/edge_tts_wav.sh" "$PREFIX/app/tools/"

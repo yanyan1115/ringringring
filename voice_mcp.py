@@ -248,6 +248,26 @@ def listen() -> str:
 
 @mcp.tool()
 @_safe_tool
+def quiet_listen(seconds: float = 8.0) -> str:
+    """Listen WITHOUT speaking: return what the user did since the last call of this tool.
+
+    The engine records the user's side in the background for the whole call, so you can
+    stay silent (type elsewhere, run other tools) and come back. Waits until at least
+    `seconds` (default 8, max 120) of audio has built up, then returns one line per
+    10 s of sound: "m:ss words[heard: ...]" (sound labels need the sound-events service).
+    "[SILENCE]" if they were quiet, "[CALL ENDED]" if they hung up.
+    """
+    s = _get()
+    if s.disconnected or not s.connected:
+        return _ended("[CALL ENDED]")
+    out = s.quiet_listen(seconds)
+    if s.disconnected:
+        return _ended((out + "\n" if out else "") + "[CALL ENDED]")
+    return out or "[SILENCE]"
+
+
+@mcp.tool()
+@_safe_tool
 def call_end(text: str = "") -> str:
     """Hang up the current call — optionally speaking one final line first.
 

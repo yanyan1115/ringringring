@@ -5,13 +5,18 @@
   },
   "metadata": {
     "description": "ringringring: your AI agent calls your phone for a two-way voice conversation over free SIP (Linphone). No Docker.",
-    "version": "0.1.1"
+    "version": "0.2.0"
   },
   "plugins": [
     {
       "name": "ringringring",
       "source": "./plugin-native",
       "description": "Two-way voice calls from Claude Code to your phone over free SIP (Linphone). Swappable STT and TTS."
+    },
+    {
+      "name": "ringringring-inbound",
+      "source": "./plugin-inbound",
+      "description": "Incoming calls (the user dials in, the agent answers), dial-back from the same account, optional quiet listening, and an HTTPS remote MCP with OAuth. Needs the ringringring native install."
     }
   ]
 }

@@ -1,7 +1,7 @@
 {
   "name": "ringringring",
   "displayName": "ringringring — your agent calls your phone, no Docker",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Two-way voice calls from Claude Code to your phone over free SIP (Linphone). Native build: prebuilt pjsua2, no Docker. Ears (STT) and mouth (TTS) are swappable: any OpenAI-compatible transcription endpoint, any TTS command.",
   "license": "AGPL-3.0-or-later",
   "keywords": [

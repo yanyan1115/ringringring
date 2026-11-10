@@ -30,7 +30,7 @@ If this helps you, a Star would mean a lot to the author ⭐
 |---|---|---|
 | Linux server | x86_64, Python 3.11; the host that runs Claude Code / OpenCode | Already have |
 | Linphone | Phone app (App Store / app stores) | Free |
-| Linphone accounts ×2 | One for the phone, one for the AI (register in the app or at subscribe.linphone.org); the AI account only needs to exist, the program only dials out and never registers with the server | Free |
+| Linphone accounts ×2 | One for the phone, one for the AI (register in the app or at subscribe.linphone.org); the AI account only needs to exist, for outgoing calls the program only dials out and never registers with the server (receiving calls does require registering, see "Incoming calls") | Free |
 | Groq API key | Speech recognition (console.groq.com) | Free tier |
 
 ### Does it work in cloud Claude Code or the official Claude app?
@@ -39,7 +39,7 @@ The calling service (the plugin program that dials and carries the audio, not yo
 
 - **VPS + Claude Code**: the easiest path; the steps below are close to one-click.
 - **Your own computer**: needs some adapting for your OS (Windows / macOS / Linux); see the platform notes in `docs/`.
-- **Cloud Claude Code or the official app**: needs a change to the current setup. The plugin is an MCP server, so switch it from local (stdio) to HTTPS, keep the calling service on your VPS or computer, and expose it through a Cloudflare Tunnel. Your cloud AI can then connect to it as a remote connector and place calls. If you need it now, your AI can make this change following that idea. We are also building this version; if you would rather wait, it's coming as soon as we can.
+- **Cloud Claude Code or the official app**: needs a change to the current setup. The plugin is an MCP server, so switch it from local (stdio) to HTTPS, keep the calling service on your VPS or computer, and expose it through a Cloudflare Tunnel. Your cloud AI can then connect to it as a remote connector and place calls. If you need it now, your AI can make this change following that idea. v0.2.0 ships this version, see "HTTPS remote MCP with OAuth" below; a one-click installer is still planned.
 
 ## Installation
 
@@ -120,6 +120,67 @@ export VOICE_TTS="edge"
 # The command is not run through a shell, so pipes and redirection are not supported; wrap them in a script if needed.
 # export VOICE_TTS_CMD="python3 my_tts.py --text {text} --out {out}"
 ```
+
+## What's new in v0.2.0
+
+Everything here is optional; the original outgoing calls work without any of it. Variable names and examples are at the end of `voice.env.example`.
+
+### Incoming calls (the `plugin-inbound` plugin)
+
+Until now only the AI could call you. Now you can call the AI: dial the AI's number in Linphone, your phone keeps ringing, the AI gets an `incoming_call` event, calls `answer`, chats with `talk` and ends with `hang_up`. When the AI wants to reach you it uses `dial` (same number, so it is the same contact on your phone).
+
+```
+/plugin install ringringring-inbound@ringringring
+```
+
+Install the main ringringring plugin first (it provides pjsua2 and the engine code). The AI's account is configured in `~/.config/ringringring/inbound.env` (`VOICE_INBOUND_SIP_ID`, `_USER`, `_PASS`, plus `VOICE_INBOUND_RING_TIMEOUT` and `VOICE_INBOUND_RTP_PORT`); `VOICE_SIP_ID` in `voice.env` is your own address, used to recognize you. This account does register with the Linphone server, otherwise it could not receive calls.
+
+**Two identity checks.** Anyone who knows a SIP address can call it, and caller ID can be spoofed, so an incoming call has to pass both: (1) the caller's `user@host` must match `VOICE_SIP_ID` exactly; (2) the caller's device must be listed in `~/.config/ringringring/trusted_devices` (one hashed Linphone device id per line, only a sha256 prefix is stored, read on every call so edits need no reconnect). Calls that fail either check get a busy tone and never wake the AI. While the list is empty **nothing is blocked**: the log just shows `device=<hash> (not enforced)` so you can copy your own hash into the list. In other words, with an empty list only the SIP address is checked, and that can be spoofed, so please fill the list in. A device id is not cryptographic proof, so do not say keys or other private details on a call.
+
+**Wait a few seconds before dialing.** Right after you switch back to Linphone it has not finished connecting, so the first INVITE carries no device id (`device=none` in the log) and is rejected: it rings once and drops. Wait a few seconds and dial again. Reinstalling Linphone changes the device id, so add the new one to the list.
+
+### Quiet listen, wait for voice, push on voice (off by default)
+
+Lets the AI stay silent on a call and only listen to your side. With `VOICE_QUIET_LISTEN=1` a background recorder runs while the call is up (memory and temp files only, dropped at hang-up).
+
+- `quiet_listen(seconds)`: returns "m:ss transcript" lines once that many seconds have collected, or `[SILENCE]`.
+- `wait_for_voice(max_sec)`: waits without speaking and returns the moment a sound arrives (no transcript; the audio stays in the recording so `quiet_listen` can still fetch the words).
+- Add `VOICE_PUSH_ON_VOICE=1` and a notification is pushed to the AI as soon as a sound starts, so it does not need to poll.
+
+All of these default to off. Because they record continuously, decide for yourself whether to turn them on.
+
+### ElevenLabs Scribe and hearing modes
+
+Besides the default Groq / OpenAI-compatible endpoint, speech recognition can use ElevenLabs Scribe (`VOICE_STT_11LABS_KEY` or `VOICE_STT_11LABS_ENV_FILE`; batch and realtime streaming variants, see `voice.env.example`). Without a key this layer is not used.
+
+`VOICE_STT_MODE` has three hearing modes: `text` gives the AI a transcript only (default); `audio` attaches your raw voice and gives no text; `both` gives both. The AI can pick one for a whole call with `dial(hear=...)` and change it mid-call with `set_hearing`. If your AI cannot take audio input, use `text`.
+
+### Speech recognition: recommendation and our setup
+
+We recommend ElevenLabs for speech recognition: the free plan gives 10,000 credits a month, which is plenty for phone transcription, and it is very accurate.
+
+The author runs three layers, each one used only if the one before fails:
+1. ElevenLabs Scribe (code default `scribe_v2`; the language code is ISO-639-3, so Chinese is `zho`, not `zh`)
+2. Groq `whisper-large-v3-turbo`
+3. Local whisper.cpp: the default model is an English-only `.en` model. It keeps turn-taking working but **cannot really transcribe Chinese**, so treat it as a last resort.
+
+You can run just one layer: a Groq key alone or an ElevenLabs key alone both work; with neither, only the local layer runs.
+
+### HTTPS remote MCP with OAuth
+
+For AIs that can only use HTTPS remote connectors, such as the Gemini web app or ChatGPT: `plugin-inbound/bin/run_remote.sh` (that is, `remote_http.py`) serves `dial`, `talk`, `quiet_listen` and `hang_up` as a remote MCP on your own host. It is dial-out only (no answering) and returns text only, never raw audio. Authentication is OAuth (dynamic client registration, PKCE, plus a "connection passphrase" page where you type the passphrase you chose).
+
+Setup: keep the service on `127.0.0.1` and forward a domain to it with a Cloudflare Tunnel (or any HTTPS reverse proxy); set `MCP_OAUTH_ENABLED=1`, `MCP_OAUTH_ISSUER_URL`, `MCP_OAUTH_CONNECT_SECRET` (the passphrase, keep it secret) and optionally `MCP_ALLOWED_HOSTS`. OAuth tokens are stored under `~/.local/share/ringringring/oauth/` by default. Without OAuth the service refuses to listen on anything but loopback. A one-click installer is planned; for now this is manual.
+
+Credits: the OAuth part of the https remote MCP is adapted from South's project.
+
+### Sound label hook (experimental, off by default)
+
+Optional: each turn's audio is POSTed to a sound classifier you run yourself, and the labels it returns (for example breathing or coughing) are appended to the transcript as `[heard: ...]`. **No classifier is included**, only the calling side: POST a WAV (header `X-Sound-Key`), get back a JSON list of label strings. Set `VOICE_SOUND_EVENTS=1`, `VOICE_SOUND_URL` and `VOICE_SOUND_KEY` on the call engine; if any is missing it stays off.
+
+### Phone microphone tip
+
+If the AI cannot hear very quiet sounds on your side (breathing, muttering), turn on the **speakerphone** in Linphone during the call and choose the **Wide Spectrum** microphone mode in the system (iPhone: pull down Control Center during the call and tap "Mic Mode"). The phone then keeps a wider range of sound instead of isolating just the voice, so faint sounds come through better.
 
 ## iPhone settings
 

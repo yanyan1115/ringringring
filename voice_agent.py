@@ -11,6 +11,9 @@ Run env (set by the launcher):
 from __future__ import annotations
 
 import atexit
+import base64
+import io
+import json
 import math
 import os
 import signal
@@ -18,12 +21,22 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import wave
 
 import pjsua2 as pj
+try:                                   # native crashes leave a stack in the diag log
+    import faulthandler as _fh
+    if os.environ.get("VOICE_DIAG_FILE"):
+        _fh_file = open(os.environ["VOICE_DIAG_FILE"], "a")
+        _fh.enable(file=_fh_file, all_threads=True)
+except Exception:
+    pass
+import sound_events
 from privacy import redact, install_stderr, Redactor
 
 install_stderr()   # stray prints / logging / tracebacks on stderr get scrubbed too
@@ -64,7 +77,7 @@ RMS_CAP = float(os.environ.get("VOICE_RMS_CAP", "3000"))  # never raise threshol
 # measured ambient ~2441 but the during-TX floor ~1-800 and the user's barge ~2000-3972 —
 # so a noise-floor-derived threshold (capped at 3000) MISSED the user. We measure the live
 # during-TX floor each utterance and clamp it to at least this, well under a real barge.
-# 1300 -> 700 (10-26): her phone-side speech mostly peaks 700-1500, so 1300 missed real barges
+# 1300 -> 700 (10-26): the caller's phone-side speech mostly peaks 700-1500, so 1300 missed real barges
 BARGE_RMS_MIN = float(os.environ.get("VOICE_BARGE_RMS_MIN", "700"))
 # Listen (capturing the user) uses a GENTLER factor than barge: barge must avoid
 # false-triggering on noise/echo (high bar), but listen must still hear the user in a
@@ -140,6 +153,37 @@ DEBUG_WAV_DIR = os.environ.get("VOICE_DEBUG_WAV_DIR",
 # VOICE_DIAG_FILE: also append _dlog lines (redacted; listen summaries are numbers only)
 # to a file, because the host's MCP log stops capturing stderr after the handshake.
 DIAG_FILE = os.environ.get("VOICE_DIAG_FILE", "").strip()
+
+# Quiet listen: while a call is up, keep recording the caller's side in the background so the
+# model can stay silent and still hear them (breathing, small sounds) between turns.
+# Default OFF: it records the call continuously (kept in memory/temp files, dropped at hang-up).
+QUIET_LISTEN = os.environ.get("VOICE_QUIET_LISTEN", "0").strip().lower() in ("1", "true", "yes")
+QUIET_CHUNK_SEC = float(os.environ.get("VOICE_QUIET_CHUNK_SEC", "10"))
+QUIET_MAX_SEC = float(os.environ.get("VOICE_QUIET_MAX_SEC", "600"))   # keep at most the last 10 min
+QUIET_VOICED_SEC = float(os.environ.get("VOICE_QUIET_VOICED_SEC", "0.3"))  # loud time a chunk needs
+# Quiet-listen gate base (breathing / soft sounds fall under the speech gate).
+# Unset = same as VOICE_LISTEN_RMS (old behaviour). Speech/barge gates are not touched.
+QUIET_RMS_BASE = float(os.environ.get("VOICE_QUIET_RMS", "") or LISTEN_RMS_BASE)
+
+# Push-on-voice (needs quiet listen): a sentry thread tails the background recording while a
+# call is up and pushes a channel notification the moment the caller makes a sound, so the model
+# does not have to fetch (quiet_listen), never has to speak, and is never looking at the past.
+PUSH_ON_VOICE = os.environ.get("VOICE_PUSH_ON_VOICE", "0").strip().lower() in ("1", "true", "yes")
+PUSH_TICK = float(os.environ.get("VOICE_PUSH_TICK", "3"))            # how often the sentry looks
+PUSH_GAP_SEC = float(os.environ.get("VOICE_PUSH_GAP_SEC", "2"))      # silence that ends a stretch
+PUSH_MIN_INTERVAL = float(os.environ.get("VOICE_PUSH_MIN_INTERVAL", "15"))  # re-push floor, by feel
+
+WAIT_VOICE_TICK = float(os.environ.get("VOICE_WAIT_TICK", "0.3"))   # wait_for_voice poll
+WAIT_VOICE_SEC = float(os.environ.get("VOICE_WAIT_VOICED_SEC", "0.15"))  # loud time that ends a wait
+
+PUSH_SINK = None   # set by the MCP server (inbound_channel.emit); None = pushes are dropped
+
+
+def set_push_sink(fn) -> None:
+    """Let the MCP server hand us its channel emitter. Kept as a plain global so voice_agent
+    never imports the server (the server imports us)."""
+    global PUSH_SINK
+    PUSH_SINK = fn
 
 
 def _dlog(msg: str) -> None:
@@ -533,8 +577,79 @@ def _groq_transcribe(wav: str) -> str:
         return _clean_text(r.read().decode("utf-8", "ignore"))
 
 
+# --- Cloud STT #2: ElevenLabs Scribe (preferred when configured) ----------------------
+# Scribe is NOT OpenAI-compatible, so it can't be reached by pointing VOICE_STT_URL at it:
+# the auth header is xi-api-key (not Bearer), the model field is model_id, and the reply is
+# JSON with the transcript under "text". Opt-in via VOICE_STT_11LABS_KEY, or
+# VOICE_STT_11LABS_ENV_FILE -> a KEY=VALUE file holding ELEVENLABS_API_KEY. With no key this
+# whole layer is inert and the ears behave exactly as before.
+ELEVEN_STT_URL = os.environ.get("VOICE_STT_11LABS_URL",
+                                "https://api.elevenlabs.io/v1/speech-to-text").strip()
+ELEVEN_STT_MODEL = os.environ.get("VOICE_STT_11LABS_MODEL", "scribe_v2").strip()
+# Scribe takes ISO-639-3 here (zho), unlike the OpenAI-style "zh" above.
+ELEVEN_STT_LANG = os.environ.get("VOICE_STT_11LABS_LANG", "zho").strip()
+
+
+def _eleven_key() -> str:
+    key = os.environ.get("VOICE_STT_11LABS_KEY", "").strip()
+    path = os.environ.get("VOICE_STT_11LABS_ENV_FILE", "").strip()
+    if not key and path:
+        try:
+            with open(os.path.expanduser(path)) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("export "):
+                        line = line[7:]
+                    if line.startswith(("VOICE_STT_11LABS_KEY=", "ELEVENLABS_API_KEY=")):
+                        key = line.split("=", 1)[1].strip().strip('"').strip("'")
+        except OSError as e:
+            _dlog(f"11labs STT env file unreadable ({type(e).__name__})")
+    return key
+
+
+_ELEVEN_KEY = _eleven_key()
+USE_ELEVEN = bool(_ELEVEN_KEY)
+# Either cloud ear means one transcription per turn: skip the in-turn streaming polls and
+# let near-end energy drive the endpoint (same reasoning as the Groq note above).
+USE_CLOUD_STT = USE_GROQ or USE_ELEVEN
+
+
+def _eleven_transcribe(wav: str) -> str:
+    with open(wav, "rb") as f:
+        audio = f.read()
+    b = "----rbkelevenboundary"
+    fields = {"model_id": ELEVEN_STT_MODEL,
+              "tag_audio_events": "false",     # no [laughter]-style annotations
+              "diarize": "false",              # single speaker on a phone leg
+              "timestamps_granularity": "none"}
+    if ELEVEN_STT_LANG:
+        fields["language_code"] = ELEVEN_STT_LANG
+    body = b"".join(
+        (f'--{b}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n').encode()
+        for k, v in fields.items())
+    body += (f'--{b}\r\nContent-Disposition: form-data; name="file"; filename="a.wav"\r\n'
+             f'Content-Type: audio/wav\r\n\r\n').encode() + audio + f'\r\n--{b}--\r\n'.encode()
+    req = urllib.request.Request(
+        ELEVEN_STT_URL, data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={b}",
+                 "xi-api-key": _ELEVEN_KEY,
+                 "User-Agent": "ringback-voice"})
+    timeout = float(os.environ.get("VOICE_STT_11LABS_TIMEOUT", "8") or "8")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        data = json.loads(r.read().decode("utf-8", "ignore"))
+    return _clean_text(data.get("text", ""))
+
+
 def _transcribe_final(wav: str) -> str:
-    """End-of-turn transcript: Groq when configured, else the whisper-server/cli path."""
+    """End-of-turn transcript: Scribe, then Groq, then the whisper-server/cli path.
+
+    Both fallbacks stay: if the ears go silent mid-call the caller is talking into a void.
+    """
+    if USE_ELEVEN:
+        try:
+            return _eleven_transcribe(wav)
+        except Exception as e:
+            _dlog(f"11labs STT failed ({type(e).__name__}: {str(e)[:120]}) -> groq/local")
     if USE_GROQ:
         try:
             return _groq_transcribe(wav)
@@ -543,15 +658,207 @@ def _transcribe_final(wav: str) -> str:
     return _transcribe_stream(wav)
 
 
+# --- Cloud STT #2b: ElevenLabs Scribe v2 Realtime (streaming, opt-in) -----------------
+# Pushes the growing recording to a WebSocket WHILE the caller talks, so when our own energy-based
+# endpoint fires we only send commit=true and wait for the committed transcript (~150ms
+# median per the docs) instead of uploading + transcribing the whole clip. Our turn logic
+# stays in charge (commit_strategy=manual). Any failure / timeout / empty result returns ""
+# and the caller falls back to the batch chain above. Off unless VOICE_STT_11LABS_STREAM=1
+# and websocket-client is importable; rollback = set it to 0 and reconnect.
+ELEVEN_RT_URL = os.environ.get("VOICE_STT_11LABS_RT_URL",
+                               "wss://api.elevenlabs.io/v1/speech-to-text/realtime").strip()
+ELEVEN_RT_MODEL = os.environ.get("VOICE_STT_11LABS_RT_MODEL", "scribe_v2_realtime").strip()
+ELEVEN_RT_COMMIT_WAIT = float(os.environ.get("VOICE_STT_11LABS_RT_WAIT", "3") or "3")
+_RT_RATES = (8000, 16000, 22050, 24000, 44100, 48000)
+try:
+    import websocket as _ws_mod      # websocket-client
+except Exception:                    # not installed -> streaming stays off
+    _ws_mod = None
+USE_ELEVEN_RT = (USE_ELEVEN and _ws_mod is not None
+                 and os.environ.get("VOICE_STT_11LABS_STREAM", "0").strip() == "1")
+
+
+def _pj_register_this_thread(name: str) -> None:
+    """Our helper threads never call pjsua2 directly, but Python's cyclic GC can run on ANY
+    thread that allocates, and collecting a pjsua2 object (old Call etc.) from an
+    unregistered thread trips a pjlib assertion and aborts the whole process (11-03: the
+    first realtime build died silently right after the first turn). Register defensively."""
+    try:
+        pj.Endpoint.instance().libRegisterThread(name)
+    except Exception:
+        pass
+
+
+class _ElevenStream:
+    """One realtime session per listen turn, fed from the recorder's growing WAV file.
+
+    ONE worker thread owns the socket for its whole life (connect, send, recv, close).
+    11-03: the first build sent from one thread, read from another and closed from a third;
+    concurrent use of one TLS connection killed the process after the turn. finish()/abort()
+    only set flags and wait for the worker."""
+
+    def __init__(self, wav_path: str):
+        self.path = wav_path
+        self.off = None            # byte offset of PCM start, found once the header exists
+        self.rate = 16000
+        self.committed: list[str] = []
+        self.err = ""
+        self.sent_bytes = 0
+        self.want_commit = threading.Event()
+        self.stop = threading.Event()
+        self.done = threading.Event()
+        self.result = ""
+        self._t = threading.Thread(target=self._run, daemon=True)
+        self._t.start()
+
+    def _read_new(self) -> bytes:
+        try:
+            with open(self.path, "rb") as f:
+                if self.off is None:
+                    head = f.read(256)
+                    if len(head) < 44 or head[:4] != b"RIFF":
+                        return b""
+                    at = head.find(b"fmt ", 12)
+                    if at >= 0 and at + 16 <= len(head):
+                        r = struct.unpack_from("<I", head, at + 12)[0]
+                        if r in _RT_RATES:
+                            self.rate = r
+                    at = head.find(b"data", 12)
+                    if at < 0:
+                        return b""
+                    self.off = at + 8
+                f.seek(self.off + self.sent_bytes)
+                buf = f.read()
+        except OSError:
+            return b""
+        return buf[:len(buf) - (len(buf) % 2)]
+
+    def _send(self, ws, pcm: bytes, commit: bool = False):
+        ws.send(json.dumps({"message_type": "input_audio_chunk",
+                            "audio_base_64": base64.b64encode(pcm).decode("ascii"),
+                            "commit": commit, "sample_rate": self.rate}))
+        self.sent_bytes += len(pcm)
+
+    def _drain(self, ws, wait: float) -> bool:
+        """Read whatever has arrived within `wait` seconds. True once a commit came back."""
+        import select
+        got = False
+        end = time.time() + wait
+        while True:
+            left = max(0.0, end - time.time())
+            sock = ws.sock
+            pending = getattr(sock, "pending", lambda: 0)()
+            if not pending:
+                r, _, _ = select.select([sock], [], [], left)
+                if not r:
+                    return got
+            raw = ws.recv()
+            if not raw:
+                raise ConnectionError("closed by server")
+            try:
+                m = json.loads(raw)
+            except ValueError:
+                continue
+            t = m.get("message_type", "")
+            if t == "committed_transcript":
+                self.committed.append(m.get("text", "") or "")
+                got = True
+                return got
+            if "error" in t or t in ("quota_exceeded", "rate_limited"):
+                raise RuntimeError(t + ": " + str(m.get("message") or m.get("error") or "")[:80])
+
+    def _run(self):
+        _pj_register_this_thread("stt-rt")
+        ws = None
+        try:
+            t0 = time.time()
+            while self.off is None and not self.stop.is_set() and time.time() - t0 < 3:
+                self._read_new()
+                time.sleep(0.05)
+            if self.stop.is_set():
+                return
+            q = {"model_id": ELEVEN_RT_MODEL, "audio_format": f"pcm_{self.rate}",
+                 "commit_strategy": "manual"}
+            if ELEVEN_STT_LANG:
+                q["language_code"] = ELEVEN_STT_LANG
+            ws = _ws_mod.create_connection(ELEVEN_RT_URL + "?" + urllib.parse.urlencode(q),
+                                           header=[f"xi-api-key: {_ELEVEN_KEY}"], timeout=5)
+            while not self.stop.is_set() and not self.want_commit.is_set():
+                pcm = self._read_new()
+                if pcm:
+                    self._send(ws, pcm)
+                self._drain(ws, 0.1)          # partials / session_started; keeps buffers empty
+            if self.want_commit.is_set() and not self.stop.is_set():
+                tail = self._read_new() or b"\x00\x00" * (self.rate // 50)   # 20ms silence
+                self._send(ws, tail, commit=True)
+                end = time.time() + ELEVEN_RT_COMMIT_WAIT
+                while time.time() < end and not self._drain(ws, end - time.time()):
+                    pass
+                self.result = "".join(self.committed).strip()
+        except Exception as e:
+            self.err = f"{type(e).__name__}: {str(e)[:60]}"
+        finally:
+            if ws is not None:
+                try:
+                    ws.close(timeout=1)
+                except Exception:
+                    pass
+            self.done.set()
+
+    def finish(self) -> str:
+        """Commit the tail, wait for the transcript. "" on failure/timeout (caller falls back)."""
+        self.want_commit.set()
+        if not self.done.wait(ELEVEN_RT_COMMIT_WAIT + 2.5):
+            self.stop.set()
+            self.err = self.err or "timeout"
+        if self.err:
+            _dlog(f"11labs realtime STT: {self.err} -> batch")
+        return _clean_text(self.result) if self.result and not self.err else ""
+
+    def abort(self):
+        self.stop.set()
+
+
 def _words(t: str) -> int:
     """Progress measure for the streamed transcript; CJK has no spaces, so count chars."""
     return len(t) if any("\u4e00" <= c <= "\u9fff" for c in t) else len(t.split())
 
 
+# Item 7 (11-03): VOICE_STT_MODE = text (default, unchanged) | audio | both.
+# audio: skip STT entirely and hand the caller's turn's raw audio back to the model (for natively
+# multimodal hosts like Gemini/GPT); both: transcript AND audio. The audio lives only in
+# memory (CallSession.last_audio) until the MCP tool result picks it up; capped per turn.
+STT_MODE = os.environ.get("VOICE_STT_MODE", "text").strip().lower()
+if STT_MODE not in ("text", "audio", "both"):
+    STT_MODE = "text"
+AUDIO_MAX_SEC = float(os.environ.get("VOICE_STT_AUDIO_MAX_SEC", "60") or "60")
+AUDIO_ONLY_PLACEHOLDER = "[the caller spoke; the audio is attached]"
+
+
+def _wav_bytes_capped(path: str, max_sec: float = AUDIO_MAX_SEC) -> bytes:
+    """Read a WAV and return it as in-memory WAV bytes, truncated to the first max_sec."""
+    try:
+        with wave.open(path, "rb") as r:
+            params = r.getparams()
+            n = min(r.getnframes(), int(params.framerate * max_sec))
+            frames = r.readframes(n)
+    except Exception:
+        return b""
+    if not frames:
+        return b""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(params.nchannels)
+        w.setsampwidth(params.sampwidth)
+        w.setframerate(params.framerate)
+        w.writeframes(frames)
+    return buf.getvalue()
+
+
 def _capture_turn(snapshot_fn, is_disconnected, max_sec: float = LISTEN_MAX_SEC,
                   start_timeout: float = START_TIMEOUT, end_silence: float = END_SILENCE,
                   energy_fn=None, end_rms: float = LISTEN_END_RMS,
-                  stats: dict | None = None) -> str:
+                  stats: dict | None = None, transcribe: bool = True) -> str:
     """The streaming capture turn-loop, with NO pjsua2/SIP dependency so it can be
     unit-tested with a file-fed audio source (see tests/test_capture.py).
 
@@ -596,7 +903,7 @@ def _capture_turn(snapshot_fn, is_disconnected, max_sec: float = LISTEN_MAX_SEC,
         rms = energy_fn() if energy_fn is not None else 0.0           # checked every poll
         rms_max = max(rms_max, rms)
         voiced = energy_fn is not None and rms > end_rms
-        if not USE_GROQ and el >= 0.5 and (el - last_check) >= 0.3:   # transcribe ~3x/sec
+        if transcribe and not USE_CLOUD_STT and el >= 0.5 and (el - last_check) >= 0.3:   # transcribe ~3x/sec
             last_check = el
             snap = snapshot_fn()
             t = _transcribe_stream(snap) if snap else ""   # already hallucination-filtered
@@ -633,10 +940,11 @@ def _listen_summary(st: dict, wav_bytes: int, result: str, hangup: bool = False)
     outcome = ("[CALL ENDED]" if (hangup or st.get("exit") == "hangup")
                else ("ok" if result else "[SILENCE]"))
     _dlog("listen: exit=%s dur=%.1fs rms_max=%.0f thresh=%.0f voiced=%d/%d snaps=%d "
-          "wav=%dB text=%dw stt=%.2fs -> %s"
+          "wav=%dB text=%dw stt=%.2fs(%s) -> %s"
           % (st.get("exit", "?"), st.get("dur", 0.0), st.get("rms_max", 0.0),
              st.get("thresh", 0.0), st.get("voiced_polls", 0), st.get("polls", 0),
-             st.get("snaps", 0), wav_bytes, len(result.split()), st.get("stt", 0.0), outcome))
+             st.get("snaps", 0), wav_bytes, len(result.split()), st.get("stt", 0.0),
+             st.get("src", "batch"), outcome))
 
 
 class _BargeState:
@@ -687,6 +995,165 @@ def _tail_rms(path: str, seconds: float = 0.25) -> float:
         return 0.0
 
 
+def _wav_pcm(path: str):
+    """(rate, int16 PCM bytes) of a pjsua recording; header sizes may be stale, so read
+    the fmt chunk for the rate and take everything after 'data'."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return 16000, b""
+    if len(data) <= 44 or data[:4] != b"RIFF":
+        return 16000, b""
+    rate = 16000
+    at = data.find(b"fmt ", 12)
+    if at >= 0 and at + 16 <= len(data):
+        rate = struct.unpack_from("<I", data, at + 12)[0] or 16000
+    at = data.find(b"data", 12)
+    if at < 0:
+        return rate, b""
+    pcm = data[at + 8:]
+    return rate, pcm[:len(pcm) - (len(pcm) % 2)]
+
+
+def _write_wav(path: str, rate: int, pcm: bytes) -> None:
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(pcm)
+
+
+def _loud_seconds(pcm: bytes, rate: int, thresh: float, win_sec: float = 0.1) -> float:
+    """Seconds of 0.1 s windows whose RMS clears `thresh` (pure stdlib)."""
+    n = max(int(rate * win_sec), 1) * 2
+    loud = 0
+    for i in range(0, len(pcm) - n + 1, n):
+        seg = pcm[i:i + n]
+        cnt = len(seg) // 2
+        vals = struct.unpack("<%dh" % cnt, seg)
+        if math.sqrt(sum(v * v for v in vals) / cnt) > thresh:
+            loud += 1
+    return loud * win_sec
+
+
+def _rms_windows(pcm: bytes, rate: int, win_sec: float = 0.1):
+    """RMS of each win_sec window (same algorithm as _loud_seconds, pure stdlib).
+
+    Diagnostics only: lets the quiet: log line say how loud the caller actually was, so a
+    voiced=0 round can be told apart as 'suppressed to nothing' vs 'just quiet'."""
+    n = max(int(rate * win_sec), 1) * 2
+    out = []
+    for i in range(0, len(pcm) - n + 1, n):
+        seg = pcm[i:i + n]
+        cnt = len(seg) // 2
+        vals = struct.unpack("<%dh" % cnt, seg)
+        out.append(math.sqrt(sum(v * v for v in vals) / cnt))
+    return out
+
+
+def _wav_end(path: str) -> int:
+    """How many PCM bytes are already on disk, i.e. "start listening from now".
+
+    A fresh wait/sentry must not replay what is already in the roll: offset 0 would hand it
+    the caller's voice from a minute ago (11-05: wait_for_voice reported the same rms=3456 twice on a
+    real call because every call started reading from byte 0). Returns 0 when the header is
+    not readable yet, which is also the right answer for a just-created file."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4096)
+            size = os.path.getsize(path)
+        if len(head) < 12 or head[:4] != b"RIFF" or head[8:12] != b"WAVE":
+            return 0
+        pos = 12
+        while pos + 8 <= len(head):
+            cid = head[pos:pos + 4]
+            csz = struct.unpack("<I", head[pos + 4:pos + 8])[0]
+            body = pos + 8
+            if cid == b"data":
+                n = max(0, size - body)
+                return n - (n % 2)
+            pos = body + csz + (csz & 1)
+    except Exception:
+        pass
+    return 0
+
+
+def _wav_tail(path: str, offset: int):
+    """PCM that has landed on disk past `offset` in a wav file that may STILL be being written.
+
+    pjsua's recorder only fixes the RIFF/data length fields when the file is finalized, so
+    wave.open() reports an empty or short file mid-recording. We parse the header ourselves and
+    read to EOF. `offset` counts bytes from the first sample. Returns (rate, pcm, new_offset);
+    (0, b"", offset) when the file is not a usable 16-bit mono wav yet.
+
+    Read-only on purpose: the sentry must never consume the roll, because quiet_listen's
+    _bg_swap() is the one allowed to clear it (design 3d, solution 1)."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4096)
+            if len(head) < 12 or head[:4] != b"RIFF" or head[8:12] != b"WAVE":
+                return 0, b"", offset
+            rate, bits, chans, pos, data_at = 0, 0, 0, 12, -1
+            while pos + 8 <= len(head):
+                cid = head[pos:pos + 4]
+                csz = struct.unpack("<I", head[pos + 4:pos + 8])[0]
+                body = pos + 8
+                if cid == b"fmt " and body + 16 <= len(head):
+                    chans = struct.unpack("<H", head[body + 2:body + 4])[0]
+                    rate = struct.unpack("<I", head[body + 4:body + 8])[0]
+                    bits = struct.unpack("<H", head[body + 14:body + 16])[0]
+                elif cid == b"data":
+                    data_at = body
+                    break
+                pos = body + csz + (csz & 1)
+            if data_at < 0 or rate <= 0 or bits != 16 or chans != 1:
+                return 0, b"", offset
+            f.seek(data_at + max(0, offset))
+            pcm = f.read()
+    except Exception:
+        return 0, b"", offset
+    n = len(pcm) - (len(pcm) % 2)
+    return rate, pcm[:n], max(0, offset) + n
+
+
+def _quiet_report(chunks, chunk_sec: float, thresh: float, transcribe, hear, stats: dict) -> str:
+    """Turn background audio into lines 'm:ss transcript[heard: ...]', one per voiced chunk.
+
+    chunks: list of (rate, pcm) pieces of chunk_sec each. Too-quiet chunks are never sent to
+    STT (whisper invents sentences from silence). Pure: transcribe/hear are passed in, so the
+    tests can feed fake audio without SIP or network."""
+    from concurrent.futures import ThreadPoolExecutor
+    voiced = [(i, rate, pcm) for i, (rate, pcm) in enumerate(chunks)
+              if _loud_seconds(pcm, rate, thresh) >= QUIET_VOICED_SEC]
+    tops = [max(_rms_windows(pcm, rate) or [0.0]) for rate, pcm in chunks]
+    stats.update(chunks=len(chunks), voiced=len(voiced),
+                 rms_max=(max(tops) if tops else 0.0), rms_tops=tops)
+
+    def one(item):
+        i, rate, pcm = item
+        wav = tempfile.mktemp(prefix="quiet-", suffix=".wav")
+        try:
+            _write_wav(wav, rate, pcm)
+            try:
+                text = _clean_text(transcribe(wav) or "")
+            except Exception:
+                text = ""
+            return i, (text + hear(wav, text)).strip()
+        finally:
+            _rm(wav)
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        results = sorted(ex.map(one, voiced))
+    lines = []
+    for i, line in results:
+        if line:
+            t = int(i * chunk_sec)
+            lines.append("%d:%02d %s" % (t // 60, t % 60, line))
+    stats.update(lines=len(lines))
+    return "\n".join(lines)
+
+
 class _Call(pj.Call):
     def __init__(self, acc, session):
         super().__init__(acc)
@@ -710,6 +1177,7 @@ class _Call(pj.Call):
 
 
 class CallSession:
+    last_audio = b""   # item 7: the caller's last turn as WAV bytes (VOICE_STT_MODE audio/both)
     def __init__(self):
         self.ep = None
         self.acc = None
@@ -721,6 +1189,14 @@ class CallSession:
         self.noise_floor = 0.0  # ambient RMS measured at call connect (see place_call)
         self.half_duplex = HALF_DUPLEX  # flips on if speaker echo is detected mid-call
         self.log = []          # unified conversation timeline (claude + user turns)
+        self._bg_lock = threading.Lock()
+        self._bg_rec = None      # background recorder (quiet listen), see _bg_start
+        self._bg_path = ""
+        self._bg_t0 = 0.0
+        self._bg_pending = []    # finished segments not yet collected: [(path, seconds)]
+        self._bg_busy = 0        # >0 while a normal talk/listen turn owns the audio
+        self._push_stop = threading.Event()   # set to stop the push-on-voice sentry
+        self._push_thread = None
 
     def _pump(self, seconds: float):
         # pjsua2 runs its own worker thread (threadCnt=1) that processes RTP and
@@ -849,12 +1325,326 @@ class CallSession:
                       % (self.noise_floor,
                          _eff_threshold(LISTEN_RMS_BASE, self.noise_floor, LISTEN_NOISE_FACTOR),
                          _eff_threshold(BARGE_RMS_BASE, self.noise_floor), LISTEN_END_RMS))
-                if not USE_GROQ:
+                if not USE_CLOUD_STT:
                     _wsrv_warm()   # lazily start the whisper-server now so it's ready to capture
+                self._bg_start()
                 return True
             if self.disconnected:
                 return False
         return False
+
+    # ---- quiet listen: background recording between turns -------------------------------
+    def _bg_swap(self):
+        """Start a fresh recorder, then stop the old one (overlap, so nothing is lost).
+        Returns (old_path, seconds) or None. Caller holds _bg_lock."""
+        # 11-03: listen()/speak_interruptible() call _bg_enter() BEFORE their own _reg(), and each
+        # MCP tool call runs on a fresh thread -> createRecorder() on an unregistered thread hit
+        # the pjlib assertion and aborted the whole process (4 crashes, blamed on streaming STT).
+        self._reg()
+        old = None
+        if self._bg_rec is not None:
+            old = (self._bg_path, time.time() - self._bg_t0)
+        new_rec = None
+        if self.connected and self.aud is not None and not self.disconnected:
+            path = tempfile.mktemp(prefix="bg-", suffix=".wav")
+            try:
+                new_rec = pj.AudioMediaRecorder()
+                new_rec.createRecorder(path)
+                self.aud.startTransmit(new_rec)
+            except Exception as e:
+                _dlog(f"quiet: recorder start failed ({type(e).__name__})")
+                new_rec = None
+        if self._bg_rec is not None:
+            try:
+                self.aud.stopTransmit(self._bg_rec)
+            except Exception:
+                pass
+            self._bg_rec = None          # drop the SWIG object -> pjsua finalizes the file
+        if new_rec is not None:
+            self._bg_rec, self._bg_path, self._bg_t0 = new_rec, path, time.time()
+        else:
+            self._bg_path, self._bg_t0 = "", 0.0
+        return old
+
+    def _bg_start(self):
+        """Call right after a call connects (place_call / inbound answer)."""
+        if not QUIET_LISTEN:
+            return
+        self._reg()
+        with self._bg_lock:
+            self._bg_clear_locked()
+            self._bg_busy = 0
+            self._bg_swap()
+        self._push_start()
+
+    def _bg_clear_locked(self):
+        if self._bg_rec is not None:
+            try:
+                self.aud.stopTransmit(self._bg_rec)
+            except Exception:
+                pass
+            self._bg_rec = None
+        for p, _ in self._bg_pending:
+            _rm(p)
+        self._bg_pending = []
+        if self._bg_path:
+            _rm(self._bg_path)
+        self._bg_path, self._bg_t0 = "", 0.0
+
+    def _bg_stop(self):
+        self._push_stop.set()
+        with self._bg_lock:
+            self._bg_clear_locked()
+
+    # ---- push on voice: tell the model the moment the caller makes a sound ----------------------
+    def _push_start(self):
+        """Start the sentry thread for this call (no-op unless VOICE_PUSH_ON_VOICE=1)."""
+        if not (PUSH_ON_VOICE and QUIET_LISTEN):
+            return
+        if PUSH_SINK is None:
+            _dlog("push: no sink set, sentry not started")
+            return
+        if self._push_thread is not None and self._push_thread.is_alive():
+            return
+        self._push_stop.clear()
+        self._push_thread = threading.Thread(target=self._push_sentry, daemon=True)
+        self._push_thread.start()
+        _dlog("push: sentry started tick=%.1fs gap=%.1fs min_interval=%.0fs"
+              % (PUSH_TICK, PUSH_GAP_SEC, PUSH_MIN_INTERVAL))
+
+    def _push_emit(self, content: str, kind: str, **extra):
+        sink = PUSH_SINK
+        if sink is None:
+            return
+        meta = {"event": "voice", "caller": "user", "kind": kind}
+        meta.update(extra)
+        try:
+            sink(content, meta)
+        except Exception as e:
+            _dlog(f"push: emit failed ({type(e).__name__})")
+
+    def _push_describe(self, rate: int, pcm: bytes, transcribe: bool):
+        """(text, labels) for a stretch. Transcription is the slow part, so the sentry only
+        asks for it when a stretch has ended (short pieces make whisper invent words)."""
+        wav = tempfile.mktemp(prefix="push-", suffix=".wav")
+        try:
+            _write_wav(wav, rate, pcm)
+            text = ""
+            if transcribe:
+                try:
+                    text = _clean_text(_transcribe_final(wav) or "")
+                except Exception:
+                    text = ""
+            try:
+                labels = sound_events.hear(wav, text)
+            except Exception:
+                labels = ""
+            return text, labels
+        finally:
+            _rm(wav)
+
+    def _push_sentry(self):
+        """Tail the background recording; push as soon as the caller makes a sound, stay quiet otherwise.
+
+        Reads the roll without consuming it (see _wav_tail), so quiet_listen keeps working
+        exactly as before and remains the fallback if pushes break."""
+        path, off = "", 0
+        seg = b""
+        seg_rate = 16000
+        seg_tops = []
+        seg_start = 0.0
+        quiet_run = 0.0
+        open_stretch = False
+        last_push = 0.0
+        while not self._push_stop.is_set() and not self.disconnected:
+            time.sleep(PUSH_TICK)
+            if self._push_stop.is_set() or self.disconnected:
+                break
+            with self._bg_lock:
+                cur, busy = self._bg_path, self._bg_busy
+            if busy:                      # a normal talk/listen turn owns the audio: stand down
+                # the talk/listen turn owns this audio: resume from now, never replay it
+                path, off = cur, (_wav_end(cur) if cur else 0)
+                seg, seg_tops, open_stretch, quiet_run = b"", [], False, 0.0
+                continue
+            if not cur:
+                continue
+            if cur != path:               # _bg_swap rotated the file, or first look
+                path, off = cur, (_wav_end(cur) if path == "" else 0)
+            rate, pcm, off = _wav_tail(path, off)
+            if not (rate and pcm):
+                continue
+            thresh = _eff_threshold(QUIET_RMS_BASE, self.noise_floor, LISTEN_NOISE_FACTOR)
+            dur = len(pcm) / 2.0 / rate
+            loud = _loud_seconds(pcm, rate, thresh)
+            top = max(_rms_windows(pcm, rate) or [0.0])
+            now = time.time()
+            if loud >= QUIET_VOICED_SEC:
+                seg_rate = rate
+                seg += pcm
+                seg_tops.append(top)
+                quiet_run = 0.0
+                if not open_stretch:      # FIRST sound: push at once, do not wait for words
+                    open_stretch, seg_start, last_push = True, now, now
+                    _, labels = self._push_describe(rate, pcm, transcribe=False)
+                    self._push_emit("[%s sound] %s rms=%.0f"
+                                    % (time.strftime("%H:%M:%S", time.localtime(now)),
+                                       labels or "", top),
+                                    "onset", rms=round(top))
+                elif now - last_push >= PUSH_MIN_INTERVAL:
+                    last_push = now
+                    self._push_emit("[still going, %d s] rms=%.0f" % (round(now - seg_start), top),
+                                    "ongoing", rms=round(top))
+            else:
+                quiet_run += dur
+                if open_stretch and quiet_run >= PUSH_GAP_SEC:
+                    sec = len(seg) / 2.0 / seg_rate
+                    text, labels = self._push_describe(seg_rate, seg, transcribe=True)
+                    _dlog("push: stretch %.1fs rms_max=%.0f tops=%s text=%d"
+                          % (sec, max(seg_tops or [0.0]),
+                             ",".join("%.0f" % v for v in seg_tops[:16]), len(text)))
+                    self._push_emit("[the last stretch, %d s] %s%s rms_max=%.0f"
+                                    % (round(sec), text, labels, max(seg_tops or [0.0])),
+                                    "stretch", seconds=round(sec),
+                                    rms_max=round(max(seg_tops or [0.0])))
+                    seg, seg_tops, open_stretch, quiet_run = b"", [], False, 0.0
+        _dlog("push: sentry stopped")
+
+    def _bg_enter(self):
+        """A normal turn starts: keep what was recorded before it."""
+        if not QUIET_LISTEN:
+            return
+        with self._bg_lock:
+            self._bg_busy += 1
+            if self._bg_busy == 1:
+                old = self._bg_swap()
+                if old:
+                    self._bg_pending.append(old)
+
+    def _bg_leave(self):
+        """The turn ended: its audio was already heard by listen(), so drop that segment."""
+        if not QUIET_LISTEN:
+            return
+        with self._bg_lock:
+            self._bg_busy = max(self._bg_busy - 1, 0)
+            if self._bg_busy == 0:
+                old = self._bg_swap()
+                if old:
+                    _rm(old[0])
+
+    def wait_for_voice(self, max_sec: float = 10.0) -> str:
+        """Block until the caller makes a sound, then return AT ONCE. '' / [SILENCE] on timeout.
+
+        The push sentry still has to interrupt a model that has handed the turn back; waiting
+        inside a tool is simpler, costs nothing while idle, and the sound itself ends the wait.
+        Unlike quiet_listen (which waits for `seconds` of audio to pile up and then CONSUMES the
+        roll), this only tails the roll read-only, so quiet_listen can still fetch the full audio
+        afterwards if the words are wanted. No transcription here: being immediate is the point."""
+        self._reg()
+        if not QUIET_LISTEN:
+            return "[QUIET LISTEN OFF]"
+        if not (self.connected and self.aud) or self.disconnected:
+            return ""
+        max_sec = max(1.0, min(float(max_sec or 10.0), 600.0))
+        if self._bg_rec is None and not self._bg_pending:
+            self._bg_start()
+        thresh = _eff_threshold(QUIET_RMS_BASE, self.noise_floor, LISTEN_NOISE_FACTOR)
+        t0 = time.time()
+        path, off = "", 0
+        primed = False
+        best = 0.0
+        while time.time() - t0 < max_sec and not self.disconnected:
+            time.sleep(WAIT_VOICE_TICK)
+            with self._bg_lock:
+                cur, busy = self._bg_path, self._bg_busy
+            if busy or not cur:          # a talk/listen turn owns the audio: stand down
+                path, off = cur, (_wav_end(cur) if cur else 0)
+                primed = True
+                continue
+            if cur != path:              # first look, or _bg_swap rotated the file
+                # first look: start from now. a rotation: the new file starts empty anyway.
+                path, off = cur, (_wav_end(cur) if not primed else 0)
+                primed = True
+            rate, pcm, off = _wav_tail(path, off)
+            if not (rate and pcm):
+                continue
+            if _loud_seconds(pcm, rate, thresh) < WAIT_VOICE_SEC:
+                continue
+            top = max(_rms_windows(pcm, rate) or [0.0])
+            best = max(best, top)
+            labels = ""
+            wav = tempfile.mktemp(prefix="wait-", suffix=".wav")
+            try:
+                _write_wav(wav, rate, pcm)
+                try:
+                    labels = sound_events.hear(wav, "")
+                except Exception:
+                    labels = ""
+            finally:
+                _rm(wav)
+            waited = time.time() - t0
+            _dlog("wait_voice: hit after %.1fs rms=%.0f thresh=%.0f" % (waited, top, thresh))
+            return "[waited %d s, sound] %s rms=%.0f" % (round(waited), labels, top)
+        _dlog("wait_voice: timeout %.0fs thresh=%.0f peak=%.0f"
+              % (max_sec, thresh, best))
+        if self.disconnected:
+            return ""
+        return "[waited quietly %d s] [SILENCE]" % round(time.time() - t0)
+
+    def quiet_listen(self, seconds: float = 8.0) -> str:
+        """Don't speak; return what the caller did since the last collection (words + sound labels),
+        waiting until at least `seconds` of audio has built up. '' if the caller was quiet."""
+        self._reg()
+        if not QUIET_LISTEN:
+            return "[QUIET LISTEN OFF]"
+        if not (self.connected and self.aud) or self.disconnected:
+            return ""
+        seconds = max(1.0, min(float(seconds or 8.0), 120.0))
+
+        def buffered():
+            with self._bg_lock:
+                cur = (time.time() - self._bg_t0) if self._bg_rec is not None else 0.0
+                return sum(d for _, d in self._bg_pending) + cur
+
+        if self._bg_rec is None and not self._bg_pending:   # e.g. engine reloaded mid-call
+            self._bg_start()
+        while buffered() < seconds and not self.disconnected:
+            time.sleep(0.1)
+        with self._bg_lock:
+            old = self._bg_swap()
+            segs = self._bg_pending + ([old] if old else [])
+            self._bg_pending = []
+        rate, pcm = 16000, b""
+        for p, _ in segs:
+            r, b = _wav_pcm(p)
+            if b:
+                rate, pcm = r, pcm + b
+            _rm(p)
+        st = {}
+        dur = len(pcm) / 2.0 / rate if rate else 0.0
+        keep = int(QUIET_MAX_SEC * rate) * 2
+        dropped = 0.0
+        if len(pcm) > keep:
+            dropped = (len(pcm) - keep) / 2.0 / rate
+            pcm = pcm[-keep:]
+        step = int(QUIET_CHUNK_SEC * rate) * 2
+        chunks = [(rate, pcm[i:i + step]) for i in range(0, len(pcm), step)
+                  if len(pcm[i:i + step]) >= rate * 2 // 2]      # skip a tail under 0.5 s
+        thresh = _eff_threshold(QUIET_RMS_BASE, self.noise_floor, LISTEN_NOISE_FACTOR)
+        _ts = time.time()
+        body = _quiet_report(chunks, QUIET_CHUNK_SEC, thresh, _transcribe_final,
+                             sound_events.hear, st)
+        _dlog("quiet: dur=%.1fs dropped=%.0fs chunks=%d voiced=%d lines=%d thresh=%.0f "
+              "rms_max=%.0f tops=%s took=%.2fs"
+              % (dur, dropped, st.get("chunks", 0), st.get("voiced", 0),
+                 st.get("lines", 0), thresh, st.get("rms_max", 0.0),
+                 ",".join("%.0f" % v for v in (st.get("rms_tops") or [])[:16]),
+                 time.time() - _ts))
+        head = "[listened quietly %d s%s]" % (round(dur), ", kept only the last %d min" % (QUIET_MAX_SEC // 60)
+                                     if dropped else "")
+        if self.disconnected and not body:
+            return ""
+        return head + ("\n" + body if body else " [SILENCE]")
 
     def speak(self, text: str):
         self._reg()
@@ -880,6 +1670,14 @@ class CallSession:
 
     def listen(self, max_sec: float = LISTEN_MAX_SEC, end_silence: float = END_SILENCE,
                start_timeout: float = START_TIMEOUT) -> str:
+        self._bg_enter()
+        try:
+            return self._listen(max_sec, end_silence, start_timeout)
+        finally:
+            self._bg_leave()
+
+    def _listen(self, max_sec: float = LISTEN_MAX_SEC, end_silence: float = END_SILENCE,
+                start_timeout: float = START_TIMEOUT) -> str:
         """Capture one user turn, STREAMED through the persistent whisper-server. Records
         and transcribes the growing clip ~3x/sec; the turn-end logic lives in the pure,
         file-testable _capture_turn (two-phase: wait `start_timeout` for the first word,
@@ -891,6 +1689,8 @@ class CallSession:
             _dlog("listen: no active media (connected=%s, disconnected=%s) -> [SILENCE]"
                   % (self.connected, self.disconnected))
             return ""
+        self.last_audio = b""                  # item 7: only this turn's audio, never stale
+        want_text = STT_MODE != "audio"
         rec_wav = tempfile.mktemp(suffix=".wav")
         rec = pj.AudioMediaRecorder()
         rec.createRecorder(rec_wav)
@@ -898,9 +1698,16 @@ class CallSession:
         # stream-capture via the pure, file-fed turn-loop (same code the tests exercise);
         # energy_fn = near-end tail RMS is the robust "still talking?" signal for end-of-turn
         st: dict = {}
+        rt = None
+        if USE_ELEVEN_RT and want_text:
+            try:
+                rt = _ElevenStream(rec_wav)
+            except Exception as e:
+                _dlog(f"11labs realtime STT: start failed ({type(e).__name__}) -> batch")
         text = _capture_turn(lambda: _wav_snapshot(rec_wav), lambda: self.disconnected,
                              max_sec=max_sec, start_timeout=start_timeout, end_silence=end_silence,
-                             energy_fn=lambda: _tail_rms(rec_wav, 0.3), stats=st)
+                             energy_fn=lambda: _tail_rms(rec_wav, 0.3), stats=st,
+                             transcribe=want_text)
         try:
             self.aud.stopTransmit(rec)
         except Exception:
@@ -911,6 +1718,8 @@ class CallSession:
         except OSError:
             wav_bytes = 0
         if text is None or self.disconnected:    # hang-up mid-turn
+            if rt is not None:
+                rt.abort()
             _listen_summary(st, wav_bytes, "", hangup=True)
             _rm(rec_wav)
             return ""
@@ -919,14 +1728,27 @@ class CallSession:
         quiet = st.get("exit") == "start_timeout" and not st.get("voiced_polls")
         snap = None if quiet else _wav_snapshot(rec_wav)   # full audio with a correct header
         _ts = time.time()
-        final = _transcribe_final(snap) if snap else ""
+        final = ""
+        if rt is not None:
+            if snap:
+                final = rt.finish()
+                st["src"] = "rt" if final else "rt-miss"
+            else:
+                rt.abort()
+        if snap and STT_MODE != "text":
+            self.last_audio = _wav_bytes_capped(snap)
+        if snap and not final and want_text:
+            final = _transcribe_final(snap)
         st["stt"] = time.time() - _ts
         if snap:
             _rm(snap)
+        if not want_text:
+            text = AUDIO_ONLY_PLACEHOLDER if (not quiet and self.last_audio) else ""
         result = "" if quiet else (final or text)
         if result and _is_backchannel(result) and not st.get("voiced_polls"):
             _vlog(f"backchannel without speech energy -> treated as silence: {result!r}")
             result = ""
+        result = (result + sound_events.hear(rec_wav, result)).strip()
         _listen_summary(st, wav_bytes, result)
         if not result and DEBUG_KEEP_WAV:        # keep the audio of a silent turn for replay
             try:
@@ -943,6 +1765,15 @@ class CallSession:
     def speak_interruptible(self, text: str, listen_after: bool = True,
                             silence_sec: float = 1.0, max_wait: float = LISTEN_MAX_SEC,
                             barge_rms: float = BARGE_RMS_BASE) -> dict:
+        self._bg_enter()
+        try:
+            return self._speak_interruptible(text, listen_after, silence_sec, max_wait, barge_rms)
+        finally:
+            self._bg_leave()
+
+    def _speak_interruptible(self, text: str, listen_after: bool = True,
+                             silence_sec: float = 1.0, max_wait: float = LISTEN_MAX_SEC,
+                             barge_rms: float = BARGE_RMS_BASE) -> dict:
         """Speak `text` while monitoring for the user talking over us (barge-in).
 
         If the user starts talking, we stop speaking immediately, note how far we
@@ -1082,6 +1913,7 @@ class CallSession:
 
     def hangup(self):
         self._reg()
+        self._bg_stop()
         try:
             if self.call:
                 self.call.hangup(pj.CallOpParam(True))

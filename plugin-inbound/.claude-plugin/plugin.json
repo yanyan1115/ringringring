@@ -1,0 +1,7 @@
+{
+  "name": "ringringring-inbound",
+  "displayName": "ringringring inbound: take and place phone calls",
+  "description": "Incoming calls for ringringring: the user dials a SIP account from Linphone, the agent is woken by a channel event, answers, talks and hangs up; it can also dial the user back from the same account. Optional quiet listening, push-on-voice and an HTTPS remote MCP with OAuth. Requires the ringringring native install (pjsua2 + app code).",
+  "version": "0.2.0",
+  "license": "AGPL-3.0-or-later"
+}
