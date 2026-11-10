@@ -33,7 +33,7 @@ If this helps you, a Star would mean a lot to the author ⭐
 |---|---|---|
 | Linux server | x86_64, Python 3.11; the host that runs Claude Code / OpenCode | Already have |
 | Linphone | Phone app (App Store / app stores) | Free |
-| Linphone account | 1 required (for your phone; register in the app or at subscribe.linphone.org); a 2nd one for the AI is optional, needed only if you want to call the AI yourself (see "Incoming calls") | Free |
+| Linphone account | 1 required (for your phone; register in the app or at subscribe.linphone.org); a 2nd one for the AI is optional, needed only if you want to call the AI yourself (see "Incoming calls"); with only one, set `VOICE_REMOTE_ACCOUNT=voice` for the HTTPS remote version | Free |
 | Speech recognition key | ElevenLabs recommended (elevenlabs.io; the free plan gives 10,000 credits a month and is very accurate); Groq (console.groq.com) also works. With both, ElevenLabs is tried first and Groq is the fallback | Free tier |
 
 ### Does it work in cloud Claude Code or the official Claude app?
@@ -41,7 +41,7 @@ If this helps you, a Star would mean a lot to the author ⭐
 The calling service (the plugin program that dials and carries the audio, not your AI itself) has to run on a VPS or your own computer. Cloud Claude Code containers usually block the UDP traffic SIP needs, so calls won't go out from there.
 
 - **VPS + Claude Code**: the easiest path; the steps below are close to one-click.
-- **Your own computer**: needs some adapting for your OS (Windows / macOS / Linux); see the platform notes in `docs/`.
+- **Your own computer**: needs some adapting for your OS (Windows / macOS / Linux); see the platform notes in `docs/` (note: these are the old upstream Ringback guides, not updated for v0.2.0).
 - **Cloud Claude Code or the official apps and websites**: use the v0.2.0 HTTPS remote version (see "HTTPS remote MCP with OAuth" below). The calling service still runs on your VPS or computer; a Cloudflare Tunnel gives it an https address, and your cloud AI connects to it as a remote connector to place calls. For now it is configured by hand; a one-click installer is planned.
 
 ## Installation
@@ -69,13 +69,13 @@ With either option, the install directory is `~/.local/share/ringringring` and t
 
 ### Configuration
 
-When installed as a plugin, fill these in at the installation prompts. Alternatively, edit `~/.config/ringringring/voice.env` (values already set in the plugin settings take precedence). The three SIP lines are required, plus at least one speech recognition key:
+When installed as a plugin, fill these in at the installation prompts. Alternatively, edit `~/.config/ringringring/voice.env` (values already set in the plugin settings take precedence). The three SIP lines are required, and at least one speech recognition key is strongly recommended (without one only local whisper.cpp is left, see below):
 
 ```bash
 export VOICE_SIP_ID="sip:<your account>@sip.linphone.org"   # the account logged in on your phone; the AI calls you with it
 export VOICE_SIP_USER="<your account>"
 export VOICE_SIP_PASS="<password>"                   # when configured by hand, credentials are stored only in this file
-# export VOICE_SIP_CALLEE="sip:<other account>@sip.linphone.org"  # optional: only to call a different address; defaults to VOICE_SIP_ID
+# export VOICE_SIP_CALLEE="sip:<other account>@sip.linphone.org"  # optional: only to call a different address; defaults to VOICE_SIP_ID (main plugin only; dial in the incoming-call plugin and the remote version always calls VOICE_SIP_ID)
 export VOICE_DISPLAY_NAME="Claude"                   # caller ID name (some phones don't show emoji)
 export VOICE_STT_11LABS_KEY="<ElevenLabs key>"       # recommended; or point VOICE_STT_11LABS_ENV_FILE at a separate file
 export VOICE_STT_KEY="<Groq key>"                    # optional fallback if ElevenLabs fails; or use VOICE_STT_ENV_FILE
@@ -85,7 +85,7 @@ export VOICE_STUN="stun.linphone.org:3478"            # lets audio cross NAT; th
 
 ### Network
 
-No ports need to be opened: the server sends audio outbound first and uses STUN to traverse NAT. In our test, calls still worked both ways with inbound UDP 4000-4100 denied in the security group. If there is no sound after the call connects, first make sure Linphone is in the foreground; if there is still no sound, try opening UDP 4000-4100 (RTP audio) in the firewall or security group.
+No ports need to be opened: the server sends audio outbound first and uses STUN to traverse NAT. In our test, calls still worked both ways with inbound UDP 4000-4100 denied in the security group. If there is no sound after the call connects, first make sure Linphone is in the foreground; if there is still no sound, try opening UDP 4000-4100 (RTP audio) in the firewall or security group, plus UDP 4200-4300 if you run the HTTPS remote version.
 
 If the call connects but neither side hears anything, and the server keeps sending audio without receiving a single packet back, the phone is most likely on a proxy or VPN that does not forward UDP (common for users in mainland China). Try in this order: (1) turn the proxy off and call directly; a user in mainland China confirmed calls work with no proxy at all. (2) If you need the proxy on, add direct (bypass) rules for linphone.org and your own server's IP; this one has not been tested yet. (3) If neither works, relay the call audio through your server; the extra hop adds some latency.
 
@@ -145,7 +145,7 @@ Install the main ringringring plugin first (it provides pjsua2 and the engine co
 
 ### Quiet listen, wait for voice, push on voice (off by default)
 
-Lets the AI stay silent on a call and only listen to your side. With `VOICE_QUIET_LISTEN=1` a background recorder runs while the call is up (memory and temp files only, dropped at hang-up).
+Lets the AI stay silent on a call and only listen to your side. With `VOICE_QUIET_LISTEN=1` a background recorder runs while the call is up (memory and temp files only; the incoming-call plugin drops it at hang-up, the main plugin when the AI calls `call_end` or the next call starts). `quiet_listen` is in both the main and the incoming-call plugin; `wait_for_voice` and push-on-voice below are only in the incoming-call plugin `plugin-inbound`.
 
 - `quiet_listen(seconds)`: returns "m:ss transcript" lines once that many seconds have collected, or `[SILENCE]`.
 - `wait_for_voice(max_sec)`: waits without speaking and returns the moment a sound arrives (no transcript; the audio stays in the recording so `quiet_listen` can still fetch the words).
@@ -155,11 +155,11 @@ All of these default to off. Because they record continuously, decide for yourse
 
 ### Hearing modes (text / raw audio)
 
-`VOICE_STT_MODE` has three hearing modes: `text` gives the AI a transcript only (default); `audio` attaches your raw voice and gives no text; `both` gives both. The AI can pick one for a whole call with `dial(hear=...)` and change it mid-call with `set_hearing`. If your AI cannot take audio input, use `text`.
+`VOICE_STT_MODE` has three hearing modes: `text` gives the AI a transcript only (default); `audio` attaches your raw voice and gives no text; `both` gives both. The AI can pick one for a whole call with `dial(hear=...)` and change it mid-call with `set_hearing`. If your AI cannot take audio input, use `text`. `audio`/`both`, `dial(hear=...)` and `set_hearing` exist only in the incoming-call plugin `plugin-inbound`; the main plugin never attaches audio: with `audio` the AI only gets a placeholder and no words, and `both` behaves like `text`, so keep `text` there.
 
 ### Speech recognition: recommendation and our setup
 
-We recommend ElevenLabs for speech recognition: the free plan gives 10,000 credits a month, which is plenty for phone transcription, and it is very accurate. Set `VOICE_STT_11LABS_KEY` (or `VOICE_STT_11LABS_ENV_FILE`); batch and realtime streaming variants are described in `voice.env.example`.
+We recommend ElevenLabs for speech recognition: the free plan gives 10,000 credits a month, which is plenty for phone transcription, and it is very accurate. Set `VOICE_STT_11LABS_KEY` (or `VOICE_STT_11LABS_ENV_FILE`); batch and realtime streaming variants are described in `voice.env.example`. Streaming also needs `websocket-client`: `~/.local/share/ringringring/venv/bin/pip install websocket-client`; without it, it falls back to batch.
 
 The author runs three layers, each one used only if the one before fails:
 1. ElevenLabs Scribe (code default `scribe_v2`; the language code is ISO-639-3, so Chinese is `zho`, not `zh`)
@@ -174,13 +174,13 @@ Works with the Claude, Gemini and ChatGPT apps and websites.
 
 For AIs that can only use HTTPS remote connectors, such as cloud Claude Code or the official apps and websites: `plugin-inbound/bin/run_remote.sh` (that is, `remote_http.py`) serves `dial`, `talk`, `quiet_listen` and `hang_up` as a remote MCP on your own host. It is dial-out only (no answering) and returns text only, never raw audio. Authentication is OAuth (dynamic client registration, PKCE, plus a "connection passphrase" page where you type the passphrase you chose).
 
-Setup: keep the service on `127.0.0.1` and forward a domain to it with a Cloudflare Tunnel (or any HTTPS reverse proxy); set `MCP_OAUTH_ENABLED=1`, `MCP_OAUTH_ISSUER_URL`, `MCP_OAUTH_CONNECT_SECRET` (the passphrase, keep it secret) and optionally `MCP_ALLOWED_HOSTS`. OAuth tokens are stored under `~/.local/share/ringringring/oauth/` by default. Without OAuth the service refuses to listen on anything but loopback. A one-click installer is planned; for now this is manual.
+The remote version dials out from the second account (the one in `inbound.env`) by default; with only one account, set `VOICE_REMOTE_ACCOUNT=voice` to use the voice.env account. Setup: keep the service on `127.0.0.1` and forward a domain to it with a Cloudflare Tunnel (or any HTTPS reverse proxy); set `MCP_OAUTH_ENABLED=1`, `MCP_OAUTH_ISSUER_URL`, `MCP_OAUTH_CONNECT_SECRET` (the passphrase, keep it secret) and optionally `MCP_ALLOWED_HOSTS`. OAuth tokens are stored under `~/.local/share/ringringring/oauth/` by default. Without OAuth the service refuses to listen on anything but loopback. A one-click installer is planned; for now this is manual.
 
 Credits: the OAuth part of the https remote MCP is adapted from South's project.
 
 ### Sound label hook (experimental, off by default)
 
-Optional: each turn's audio is POSTed to a sound classifier you run yourself, and the labels it returns (for example breathing or coughing) are appended to the transcript as `[heard: ...]`. **No classifier is included**, only the calling side: POST a WAV (header `X-Sound-Key`), get back a JSON list of label strings. Set `VOICE_SOUND_EVENTS=1`, `VOICE_SOUND_URL` and `VOICE_SOUND_KEY` on the call engine; if any is missing it stays off.
+Optional: each turn's audio (and each chunk picked up by quiet listen / wait for voice) is POSTed to a sound classifier you run yourself, and the labels it returns (for example breathing or coughing) are appended to the transcript as `[heard: ...]`. **No classifier is included**, only the calling side: POST a WAV (header `X-Sound-Key`; the first 500 characters of the transcript are sent too, URL-encoded in header `X-Sound-Text`, so only point it at a service you trust), get back a JSON list of label strings. Set `VOICE_SOUND_EVENTS=1`, `VOICE_SOUND_URL` and `VOICE_SOUND_KEY` on the call engine; if any is missing it stays off.
 
 ### Phone microphone tip
 
@@ -203,7 +203,7 @@ If the AI cannot hear very quiet sounds on your side (breathing, muttering), tur
 | Transcription slow or empty | Check the STT key and quota |
 | Names and proper nouns misrecognized | A known limitation of the free model; you can swap the STT service |
 | Running on a Mac | Not a one-click install: on Apple Silicon see [docs/SETUP_MACOS.md](docs/SETUP_MACOS.md), or use Docker ([docs/SETUP_DOCKER.md](docs/SETUP_DOCKER.md)); a user has it running on a Mac mini. Note that the Docker image in this repo is still the upstream version and does not include the v0.2.0 features; an update is planned. The prebuilt package in Releases is Linux x86_64 only |
-| libInit fails with 259804 on a Mac (SRTP init) | flat_namespace binds OpenSSL symbols to the system LibreSSL; use Docker, or build the SWIG bindings with `-std=c++11`. Don't disable SRTP, or the other side returns 488 |
+| libInit fails with 259804 on a Mac (SRTP init) | flat_namespace binds OpenSSL symbols to the system LibreSSL; use Docker (old upstream image, no v0.2.0 features), or build the SWIG bindings with `-std=c++11`. Don't disable SRTP, or the other side returns 488 |
 | Does it work with a self-built frontend? | If the frontend's backend runs Claude Code or similar on a VPS, installing this plugin there should work (untested); if the frontend supports remote MCP, you can add the HTTPS remote version directly (see above). The calling service still has to run on a VPS or your own computer |
 
 ### If you write or change the pjsua2 config yourself

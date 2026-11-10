@@ -100,7 +100,7 @@ rm -rf "$PREFIX/pjsua2"; mv "$top" "$PREFIX/pjsua2"
 # --- app code ----------------------------------------------------------------------
 rm -rf "$PREFIX/app"; mkdir -p "$PREFIX/app/tools"
 # sound_events.py is imported at top level by voice_agent.py: it must be in this list.
-# The worker/server pair is optional (experimental sound events) but harmless to ship.
+# The sound label hook is off unless VOICE_SOUND_EVENTS/URL/KEY are set; no classifier ships here.
 for f in voice_mcp.py voice_agent.py privacy.py platform_compat.py aec.py \
          sound_events.py; do
   [ -f "$SRC/$f" ] && cp "$SRC/$f" "$PREFIX/app/"
@@ -122,6 +122,8 @@ if [ ! -f "$CONF" ]; then
 VOICE_SIP_ID=
 VOICE_SIP_USER=
 VOICE_SIP_PASS=
+# Speech recognition: ElevenLabs recommended, Groq (VOICE_STT_KEY) is the fallback
+# VOICE_STT_11LABS_KEY=   (recommended; uncomment and fill in to enable)
 VOICE_STT_KEY=
 # VOICE_STT_URL=https://api.groq.com/openai/v1/audio/transcriptions
 # VOICE_STT_MODEL=whisper-large-v3-turbo

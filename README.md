@@ -33,7 +33,7 @@
 |---|---|---|
 | Linux 服务器 | x86_64，Python 3.11；即运行 Claude Code／OpenCode 的主机 | 已有 |
 | Linphone | 手机端 App（App Store／各应用商店） | 免费 |
-| Linphone 账号 | 1 个必需（手机上用，App 内注册或 subscribe.linphone.org）；第 2 个可选：给 AI 用，你想主动拨给 AI 才需要（见「接电话」） | 免费 |
+| Linphone 账号 | 1 个必需（手机上用，App 内注册或 subscribe.linphone.org）；第 2 个可选：给 AI 用，你想主动拨给 AI 才需要（见「接电话」）；只有 1 个时，HTTPS 远程版要设 `VOICE_REMOTE_ACCOUNT=voice` | 免费 |
 | 语音识别 key | 推荐 ElevenLabs（elevenlabs.io，免费版每月 1 万额度，精度高）；也可用 Groq（console.groq.com）。两个都填时先用 ElevenLabs，失败再用 Groq | 免费额度 |
 
 ### 云端 CC／官方 App 能用吗
@@ -41,7 +41,7 @@
 打电话的服务（负责拨号、传声音的插件程序，不是你的 AI 本身）必须跑在 VPS 或自己的电脑上。云端 CC 的容器一般不放行 SIP 用的 UDP，装进去也拨不出去。
 
 - **VPS＋Claude Code**：最方便，按下面的步骤基本一键直通。
-- **自己的电脑**：需要按自己的系统（Windows／macOS／Linux）适配一下，可参考 `docs/` 里的各平台说明。
+- **自己的电脑**：需要按自己的系统（Windows／macOS／Linux）适配一下，可参考 `docs/` 里的各平台说明（注意：这些是上游 Ringback 的旧说明，没有按 v0.2.0 更新）。
 - **云端 CC 或官方 App／网页**：用 v0.2.0 的 HTTPS 远程版（见下文「HTTPS 远程 MCP（OAuth）」）。打电话的服务照样跑在 VPS／电脑上，用 Cloudflare 隧道转出一个 https 网址，云端的 AI 作为远程连接器连过去打电话。目前需要手动配置，一键安装还在计划中。
 
 ## 安装
@@ -69,13 +69,13 @@ plugin-native/bin/install.sh --pjsua2 https://github.com/yanyan1115/ringringring
 
 ### 配置
 
-以插件方式安装时，在安装提示中填写即可。也可编辑 `~/.config/ringringring/voice.env`（插件设置中已填写的项优先）。SIP 三项必填，识别 key 至少填一个：
+以插件方式安装时，在安装提示中填写即可。也可编辑 `~/.config/ringringring/voice.env`（插件设置中已填写的项优先）。SIP 三项必填，识别 key 强烈建议至少填一个（不填就只剩本机 whisper.cpp，见下文）：
 
 ```bash
 export VOICE_SIP_ID="sip:<你的账号>@sip.linphone.org"   # 你手机上登录的那个号，AI 用它拨给你
 export VOICE_SIP_USER="<你的账号>"
 export VOICE_SIP_PASS="<密码>"                       # 手动配置时凭据仅保存在此文件
-# export VOICE_SIP_CALLEE="sip:<别的号>@sip.linphone.org"  # 可选：要拨别的号才填，默认拨 VOICE_SIP_ID
+# export VOICE_SIP_CALLEE="sip:<别的号>@sip.linphone.org"  # 可选：要拨别的号才填，默认拨 VOICE_SIP_ID（只管主插件；来电插件和远程版的 dial 总是拨 VOICE_SIP_ID）
 export VOICE_DISPLAY_NAME="Claude"                   # 来电显示名称（部分手机不显示 emoji）
 export VOICE_STT_11LABS_KEY="<ElevenLabs key>"       # 推荐；或以 VOICE_STT_11LABS_ENV_FILE 指向单独的文件
 export VOICE_STT_KEY="<Groq key>"                    # 可选，ElevenLabs 失败时的后备；或用 VOICE_STT_ENV_FILE
@@ -85,7 +85,7 @@ export VOICE_STUN="stun.linphone.org:3478"            # 让音频穿过 NAT；�
 
 ### 网络
 
-无需放行端口：服务器先向外发送音频并借助 STUN 穿越 NAT，实测在安全组中拒绝 UDP 4000-4100 入站后，通话仍双向正常。如接通后听不到声音，先确认 Linphone 处于前台；仍无声音时，可尝试在防火墙或安全组中放行 UDP 4000-4100（RTP 音频）。
+无需放行端口：服务器先向外发送音频并借助 STUN 穿越 NAT，实测在安全组中拒绝 UDP 4000-4100 入站后，通话仍双向正常。如接通后听不到声音，先确认 Linphone 处于前台；仍无声音时，可尝试在防火墙或安全组中放行 UDP 4000-4100（RTP 音频）；跑 HTTPS 远程版的话再加 UDP 4200-4300。
 
 接通后两边都听不到声音、服务器一直往外发音频却一个包都收不到：多半是手机开着代理／VPN，而它不转发 UDP（国内用户挂梯子时常见）。按这个顺序试：① 关掉代理直接打，国内用户实测不开代理就能打通；② 需要一直开着代理的，在代理里把 linphone.org 和你自己服务器的 IP 设成直连（分流），这一条还没有实测；③ 以上都不行，再在服务器上为通话音频搭一层桥接，多绕一段路，延迟会高一些。
 
@@ -145,7 +145,7 @@ export VOICE_TTS="edge"
 
 ### 安静听、等声音、有声就推（默认关）
 
-让 AI 在通话里不出声，只听你这边：设 `VOICE_QUIET_LISTEN=1` 后，接通期间会在后台持续录音（只放内存和临时文件，挂断即丢弃）。
+让 AI 在通话里不出声，只听你这边：设 `VOICE_QUIET_LISTEN=1` 后，接通期间会在后台持续录音（只放内存和临时文件；来电插件在挂断时丢弃，主插件在 AI 调 `call_end` 或下一通电话开始时丢弃）。`quiet_listen` 主插件和来电插件都有；下面的 `wait_for_voice`、有声就推只在来电插件 `plugin-inbound` 里。
 
 - `quiet_listen(seconds)`：攒够这么多秒后返回"分:秒 转写"，全静则返回 `[SILENCE]`。
 - `wait_for_voice(max_sec)`：什么都不说地等着，一出声就立刻返回（不转写，录音原样保留，之后可再用 `quiet_listen` 取字）。
@@ -155,11 +155,11 @@ export VOICE_TTS="edge"
 
 ### 听法（文字／原声）
 
-听法 `VOICE_STT_MODE` 有三档：`text` 只给 AI 转写文字（默认）；`audio` 把你说的原声作为音频附上，不给文字；`both` 两者都给。AI 拨号时可以用 `dial(hear=...)` 为整通电话选一档，通话中用 `set_hearing` 改。AI 不是原生多模态、不能听音频时请用 `text`。
+听法 `VOICE_STT_MODE` 有三档：`text` 只给 AI 转写文字（默认）；`audio` 把你说的原声作为音频附上，不给文字；`both` 两者都给。AI 拨号时可以用 `dial(hear=...)` 为整通电话选一档，通话中用 `set_hearing` 改。AI 不是原生多模态、不能听音频时请用 `text`。`audio`／`both`、`dial(hear=...)`、`set_hearing` 只在来电插件 `plugin-inbound` 里有；主插件不会附音频：设 `audio` 时 AI 只收到一句占位、没有文字，设 `both` 等于 `text`，所以主插件请保持 `text`。
 
 ### 语音识别推荐与我们的配置
 
-推荐用 ElevenLabs 做语音识别：免费版每月 1 万额度，用来做电话听写完全够用，而且精度很高。填 `VOICE_STT_11LABS_KEY`（或 `VOICE_STT_11LABS_ENV_FILE`）即可；另有批量与实时流式两种，见 `voice.env.example`。
+推荐用 ElevenLabs 做语音识别：免费版每月 1 万额度，用来做电话听写完全够用，而且精度很高。填 `VOICE_STT_11LABS_KEY`（或 `VOICE_STT_11LABS_ENV_FILE`）即可；另有批量与实时流式两种，见 `voice.env.example`；实时流式还要装 `websocket-client`：`~/.local/share/ringringring/venv/bin/pip install websocket-client`，没装会自动退回批量。
 
 作者自己用的是三层，前一层失败才往下走：
 1. ElevenLabs Scribe（代码默认 `scribe_v2`；语言参数用 ISO-639-3，中文是 `zho` 而不是 `zh`）
@@ -174,13 +174,13 @@ export VOICE_TTS="edge"
 
 给云端 CC、官方 App／网页这类只能连 HTTPS 远程连接器的 AI 用：`plugin-inbound/bin/run_remote.sh`（即 `remote_http.py`）在你的主机上以 HTTPS 远程 MCP 方式提供 `dial`、`talk`、`quiet_listen`、`hang_up`（只打出去，没有接听；只回文字，不传原声）。认证是 OAuth（动态注册、PKCE，外加一个"连接口令"页面：连接时输入你设的口令）。
 
-做法：让服务只监听 `127.0.0.1`，用 Cloudflare 隧道（或任意 HTTPS 反代）把一个域名转发过来；设置 `MCP_OAUTH_ENABLED=1`、`MCP_OAUTH_ISSUER_URL`、`MCP_OAUTH_CONNECT_SECRET`（口令，自己保管）、可选 `MCP_ALLOWED_HOSTS`。OAuth 令牌默认存在 `~/.local/share/ringringring/oauth/`。未开 OAuth 时，服务拒绝监听非本机地址。一键安装脚本在计划中，目前需要手动配置。
+做法：让服务只监听 `127.0.0.1`，用 Cloudflare 隧道（或任意 HTTPS 反代）把一个域名转发过来；远程版默认用第二个账号（`inbound.env` 里那个）拨出，只有一个账号时设 `VOICE_REMOTE_ACCOUNT=voice` 改用 voice.env 的账号；设置 `MCP_OAUTH_ENABLED=1`、`MCP_OAUTH_ISSUER_URL`、`MCP_OAUTH_CONNECT_SECRET`（口令，自己保管）、可选 `MCP_ALLOWED_HOSTS`。OAuth 令牌默认存在 `~/.local/share/ringringring/oauth/`。未开 OAuth 时，服务拒绝监听非本机地址。一键安装脚本在计划中，目前需要手动配置。
 
 致谢：https 远程 MCP 的 OAuth 部分改编自 South 的项目。
 
 ### 声音标签接口（实验，默认关）
 
-可选：把每一轮的音频 POST 给你自己运行的声音分类器，把它返回的标签（比如呼吸、咳嗽）以 `[heard: ...]` 附在转写后面。仓库里**不含分类器**，只有调用这一侧：接口是 POST 一段 WAV（请求头 `X-Sound-Key`），返回标签字符串的 JSON 列表。在通话引擎一侧设 `VOICE_SOUND_EVENTS=1`、`VOICE_SOUND_URL`、`VOICE_SOUND_KEY` 即可；任何一项缺失就完全不生效。
+可选：把每一轮（以及安静听、等声音拿到的每段）音频 POST 给你自己运行的声音分类器，把它返回的标签（比如呼吸、咳嗽）以 `[heard: ...]` 附在转写后面。仓库里**不含分类器**，只有调用这一侧：接口是 POST 一段 WAV（请求头 `X-Sound-Key`；转写的前 500 字也会经 URL 编码放在请求头 `X-Sound-Text` 里一起发过去，请只连你自己信得过的服务），返回标签字符串的 JSON 列表。在通话引擎一侧设 `VOICE_SOUND_EVENTS=1`、`VOICE_SOUND_URL`、`VOICE_SOUND_KEY` 即可；任何一项缺失就完全不生效。
 
 ### 手机端麦克风小技巧
 
@@ -203,7 +203,7 @@ export VOICE_TTS="edge"
 | 转写延迟高或为空 | 检查 STT key 与额度 |
 | 人名、专有名词识别错误 | 免费模型的已知局限；可替换 STT 服务 |
 | 想在 Mac 上运行 | 不是一键安装：Apple Silicon 参考 [docs/SETUP_MACOS.md](docs/SETUP_MACOS.md)，或使用 Docker（[docs/SETUP_DOCKER.md](docs/SETUP_DOCKER.md)）；已有用户在 Mac mini 上跑通。注意仓库里的 Docker 镜像还是上游旧版，不含 v0.2.0 的新功能，更新在计划中。Release 中的预编译包仅支持 Linux x86_64 |
-| Mac 上 libInit 报 259804（SRTP 初始化失败） | flat_namespace 使 OpenSSL 符号绑定到系统 LibreSSL；改用 Docker，或编译 SWIG 绑定时加 `-std=c++11`。不要关闭 SRTP，否则对方返回 488 |
+| Mac 上 libInit 报 259804（SRTP 初始化失败） | flat_namespace 使 OpenSSL 符号绑定到系统 LibreSSL；改用 Docker（上游旧镜像，不含 v0.2.0 新功能），或编译 SWIG 绑定时加 `-std=c++11`。不要关闭 SRTP，否则对方返回 488 |
 | 能接入自建前端吗 | 前端的后端若在 VPS 上以 Claude Code 等运行，在该机安装本插件应可使用（未实测）；前端若支持远程 MCP，可直接添加 HTTPS 远程版（见上文）。打电话的服务仍需运行在 VPS 或自己的电脑上 |
 
 ### 自己写或改 pjsua2 配置时
