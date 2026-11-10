@@ -23,6 +23,9 @@
 - **单线路锁**：同一主机上的多个 AI 入口共享一条线路，通话中再次拨号将返回忙线。
 - **隐私默认值**：日志仅记录接通、挂断、错误类别与转写文本；手机网络地址默认打码，以降低其进入模型上下文的风险（不构成对服务器管理员的强隔离）。
 - **可替换的识别与合成**：语音识别与语音合成均可配置，详见「替换语音识别与语音合成」。
+- **接电话**（v0.2.0，可选插件）：你也可以在 Linphone 里拨给 AI。
+- **安静听**（v0.2.0，默认关）：通话里 AI 可以不出声，只听你这边。
+- **HTTPS 远程版**（v0.2.0）：适配 Claude、Gemini、ChatGPT 的 APP/网页端。
 
 ## 前置条件
 
@@ -31,7 +34,7 @@
 | Linux 服务器 | x86_64，Python 3.11；即运行 Claude Code／OpenCode 的主机 | 已有 |
 | Linphone | 手机端 App（App Store／各应用商店） | 免费 |
 | Linphone 账号 | 1 个必需（手机上用，App 内注册或 subscribe.linphone.org）；第 2 个可选：给 AI 用，你想主动拨给 AI 才需要（见「接电话」） | 免费 |
-| Groq API key | 语音识别（console.groq.com） | 免费额度 |
+| 语音识别 key | 推荐 ElevenLabs（elevenlabs.io，免费版每月 1 万额度，精度高）；也可用 Groq（console.groq.com）。两个都填时先用 ElevenLabs，失败再用 Groq | 免费额度 |
 
 ### 云端 CC／官方 App 能用吗
 
@@ -39,7 +42,7 @@
 
 - **VPS＋Claude Code**：最方便，按下面的步骤基本一键直通。
 - **自己的电脑**：需要按自己的系统（Windows／macOS／Linux）适配一下，可参考 `docs/` 里的各平台说明。
-- **云端 CC 或官方 App**：需要在现在的方案上改一下。这个插件本质上是一个 MCP，把现在的本地（stdio）形式改成 HTTPS 形式，打电话的服务照样跑在 VPS／电脑上，再用 Cloudflare 隧道做内网穿透，云端的 AI 就能作为远程连接器连过去打电话。急用的话可以让你的 AI 照这个思路自己改；v0.2.0 已经带了这个版本，见下文「HTTPS 远程 MCP（OAuth）」；一键安装脚本还在计划中。
+- **云端 CC 或官方 App／网页**：用 v0.2.0 的 HTTPS 远程版（见下文「HTTPS 远程 MCP（OAuth）」）。打电话的服务照样跑在 VPS／电脑上，用 Cloudflare 隧道转出一个 https 网址，云端的 AI 作为远程连接器连过去打电话。目前需要手动配置，一键安装还在计划中。
 
 ## 安装
 
@@ -50,7 +53,7 @@
 /plugin install ringringring@ringringring
 ```
 
-安装时按提示填写 SIP 账号、密码与语音识别 key（未提示时可执行 `/plugin configure ringringring@ringringring`）。插件首次启动时自动下载并安装运行环境（实测约 15 秒），无需手动执行脚本。如服务器缺少系统包，插件启动失败并给出一条 `sudo apt-get install …` 命令，执行后在 `/mcp` 中重新连接即可。
+安装时按提示填写 SIP 账号、密码与语音识别 key（未提示时可执行 `/plugin configure ringringring@ringringring`）。安装提示里的识别 key 一栏是 Groq 的；用 ElevenLabs 的话，把 `VOICE_STT_11LABS_KEY` 写进 `~/.config/ringringring/voice.env`（见「配置」）。插件首次启动时自动下载并安装运行环境（实测约 15 秒），无需手动执行脚本。如服务器缺少系统包，插件启动失败并给出一条 `sudo apt-get install …` 命令，执行后在 `/mcp` 中重新连接即可。
 
 **方式二：手动安装**
 
@@ -66,15 +69,16 @@ plugin-native/bin/install.sh --pjsua2 https://github.com/yanyan1115/ringringring
 
 ### 配置
 
-以插件方式安装时，在安装提示中填写即可。也可编辑 `~/.config/ringringring/voice.env`，至少填写以下各项（插件设置中已填写的项优先）：
+以插件方式安装时，在安装提示中填写即可。也可编辑 `~/.config/ringringring/voice.env`（插件设置中已填写的项优先）。SIP 三项必填，识别 key 至少填一个：
 
 ```bash
-export VOICE_SIP_ID="sip:<AI 账号>@sip.linphone.org"
-export VOICE_SIP_USER="<AI 账号>"
+export VOICE_SIP_ID="sip:<你的账号>@sip.linphone.org"   # 你手机上登录的那个号，AI 用它拨给你
+export VOICE_SIP_USER="<你的账号>"
 export VOICE_SIP_PASS="<密码>"                       # 手动配置时凭据仅保存在此文件
-export VOICE_SIP_CALLEE="sip:<手机账号>@sip.linphone.org"
+# export VOICE_SIP_CALLEE="sip:<别的号>@sip.linphone.org"  # 可选：要拨别的号才填，默认拨 VOICE_SIP_ID
 export VOICE_DISPLAY_NAME="Claude"                   # 来电显示名称（部分手机不显示 emoji）
-export VOICE_STT_KEY="<Groq key>"                    # 或以 VOICE_STT_ENV_FILE 指向单独的文件
+export VOICE_STT_11LABS_KEY="<ElevenLabs key>"       # 推荐；或以 VOICE_STT_11LABS_ENV_FILE 指向单独的文件
+export VOICE_STT_KEY="<Groq key>"                    # 可选，ElevenLabs 失败时的后备；或用 VOICE_STT_ENV_FILE
 export VOICE_STT_LANG="zh"
 export VOICE_STUN="stun.linphone.org:3478"            # 让音频穿过 NAT；插件安装时已默认填好
 ```
@@ -99,10 +103,10 @@ export VOICE_STUN="stun.linphone.org:3478"            # 让音频穿过 NAT；�
 
 ## 替换语音识别与语音合成
 
-**语音识别（STT）**：支持任意兼容 OpenAI `/audio/transcriptions` 接口的服务。
+**语音识别（STT）**：推荐 ElevenLabs，见下文「语音识别推荐与我们的配置」。后备那一层支持任意兼容 OpenAI `/audio/transcriptions` 接口的服务：
 
 ```bash
-# 默认：Groq
+# 默认地址：Groq
 export VOICE_STT_URL="https://api.groq.com/openai/v1/audio/transcriptions"
 export VOICE_STT_MODEL="whisper-large-v3-turbo"
 # OpenAI：
@@ -149,28 +153,26 @@ export VOICE_TTS="edge"
 
 这些开关默认都是关的。因为会持续录音，请自己决定要不要开。
 
-### ElevenLabs Scribe 识别与听法
-
-除了默认的 Groq／OpenAI 兼容接口，语音识别可换成 ElevenLabs Scribe（`VOICE_STT_11LABS_KEY` 或 `VOICE_STT_11LABS_ENV_FILE`，另有批量与实时流式两种，见 `voice.env.example`）；没有 key 就不启用这一层。
+### 听法（文字／原声）
 
 听法 `VOICE_STT_MODE` 有三档：`text` 只给 AI 转写文字（默认）；`audio` 把你说的原声作为音频附上，不给文字；`both` 两者都给。AI 拨号时可以用 `dial(hear=...)` 为整通电话选一档，通话中用 `set_hearing` 改。AI 不是原生多模态、不能听音频时请用 `text`。
 
 ### 语音识别推荐与我们的配置
 
-推荐用 ElevenLabs 做语音识别：免费版每月 1 万额度，用来做电话听写完全够用，而且精度很高。
+推荐用 ElevenLabs 做语音识别：免费版每月 1 万额度，用来做电话听写完全够用，而且精度很高。填 `VOICE_STT_11LABS_KEY`（或 `VOICE_STT_11LABS_ENV_FILE`）即可；另有批量与实时流式两种，见 `voice.env.example`。
 
 作者自己用的是三层，前一层失败才往下走：
 1. ElevenLabs Scribe（代码默认 `scribe_v2`；语言参数用 ISO-639-3，中文是 `zho` 而不是 `zh`）
 2. Groq `whisper-large-v3-turbo`
 3. 本机 whisper.cpp：默认挂的是 `.en` 英文模型，只能保证断句，**中文基本认不出**，只当最后一道兜底
 
-三层可以只开其中一层：只配 Groq 或只配 ElevenLabs 的 key 都能用，都不配就只走本机。
+只配 ElevenLabs 或只配 Groq 的 key 都能用。两个都不配时只剩本机 whisper.cpp：插件不会自动安装它，需要自己装好 whisper.cpp 和模型，而且默认模型认不了中文，不建议这样用。
 
 ### HTTPS 远程 MCP（OAuth）
 
 适配 Claude、Gemini、ChatGPT 的 APP/网页端。
 
-给 Gemini 网页版、ChatGPT 等只能连 HTTPS 远程连接器的 AI 用：`plugin-inbound/bin/run_remote.sh`（即 `remote_http.py`）在你的主机上以 HTTPS 远程 MCP 方式提供 `dial`、`talk`、`quiet_listen`、`hang_up`（只打出去，没有接听；只回文字，不传原声）。认证是 OAuth（动态注册、PKCE，外加一个"连接口令"页面：连接时输入你设的口令）。
+给云端 CC、官方 App／网页这类只能连 HTTPS 远程连接器的 AI 用：`plugin-inbound/bin/run_remote.sh`（即 `remote_http.py`）在你的主机上以 HTTPS 远程 MCP 方式提供 `dial`、`talk`、`quiet_listen`、`hang_up`（只打出去，没有接听；只回文字，不传原声）。认证是 OAuth（动态注册、PKCE，外加一个"连接口令"页面：连接时输入你设的口令）。
 
 做法：让服务只监听 `127.0.0.1`，用 Cloudflare 隧道（或任意 HTTPS 反代）把一个域名转发过来；设置 `MCP_OAUTH_ENABLED=1`、`MCP_OAUTH_ISSUER_URL`、`MCP_OAUTH_CONNECT_SECRET`（口令，自己保管）、可选 `MCP_ALLOWED_HOSTS`。OAuth 令牌默认存在 `~/.local/share/ringringring/oauth/`。未开 OAuth 时，服务拒绝监听非本机地址。一键安装脚本在计划中，目前需要手动配置。
 
@@ -200,9 +202,9 @@ export VOICE_TTS="edge"
 | 返回 LINE BUSY | 同一主机上另一 AI 入口正在通话；无需重复拨号 |
 | 转写延迟高或为空 | 检查 STT key 与额度 |
 | 人名、专有名词识别错误 | 免费模型的已知局限；可替换 STT 服务 |
-| 想在 Mac 上运行 | 不是一键安装：Apple Silicon 参考 [docs/SETUP_MACOS.md](docs/SETUP_MACOS.md)，或使用 Docker（[docs/SETUP_DOCKER.md](docs/SETUP_DOCKER.md)）；已有用户在 Mac mini 上跑通。Release 中的预编译包仅支持 Linux x86_64 |
+| 想在 Mac 上运行 | 不是一键安装：Apple Silicon 参考 [docs/SETUP_MACOS.md](docs/SETUP_MACOS.md)，或使用 Docker（[docs/SETUP_DOCKER.md](docs/SETUP_DOCKER.md)）；已有用户在 Mac mini 上跑通。注意仓库里的 Docker 镜像还是上游旧版，不含 v0.2.0 的新功能，更新在计划中。Release 中的预编译包仅支持 Linux x86_64 |
 | Mac 上 libInit 报 259804（SRTP 初始化失败） | flat_namespace 使 OpenSSL 符号绑定到系统 LibreSSL；改用 Docker，或编译 SWIG 绑定时加 `-std=c++11`。不要关闭 SRTP，否则对方返回 488 |
-| 能接入自建前端吗 | 前端的后端若在 VPS 上以 Claude Code 等运行，在该机安装本插件应可使用（未实测）；前端若支持远程 MCP，远程版完成后可直接添加。打电话的服务仍需运行在 VPS 或自己的电脑上 |
+| 能接入自建前端吗 | 前端的后端若在 VPS 上以 Claude Code 等运行，在该机安装本插件应可使用（未实测）；前端若支持远程 MCP，可直接添加 HTTPS 远程版（见上文）。打电话的服务仍需运行在 VPS 或自己的电脑上 |
 
 ### 自己写或改 pjsua2 配置时
 

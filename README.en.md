@@ -23,6 +23,9 @@ If this helps you, a Star would mean a lot to the author ⭐
 - **Single-line lock**: multiple AI entry points on the same host share one line; dialing again during a call returns busy.
 - **Privacy defaults**: logs record only connect, hang-up, error category and transcript text; the phone's network address is masked by default to reduce the risk of it entering the model's context (this is not strong isolation from the server administrator).
 - **Swappable recognition and synthesis**: both speech recognition and speech synthesis are configurable; see "Swapping speech recognition and speech synthesis".
+- **Incoming calls** (v0.2.0, optional plugin): you can also call the AI from Linphone.
+- **Quiet listen** (v0.2.0, off by default): during a call the AI can stay silent and just listen to your side.
+- **HTTPS remote version** (v0.2.0): works with the Claude, Gemini and ChatGPT apps and websites.
 
 ## Prerequisites
 
@@ -31,7 +34,7 @@ If this helps you, a Star would mean a lot to the author ⭐
 | Linux server | x86_64, Python 3.11; the host that runs Claude Code / OpenCode | Already have |
 | Linphone | Phone app (App Store / app stores) | Free |
 | Linphone account | 1 required (for your phone; register in the app or at subscribe.linphone.org); a 2nd one for the AI is optional, needed only if you want to call the AI yourself (see "Incoming calls") | Free |
-| Groq API key | Speech recognition (console.groq.com) | Free tier |
+| Speech recognition key | ElevenLabs recommended (elevenlabs.io; the free plan gives 10,000 credits a month and is very accurate); Groq (console.groq.com) also works. With both, ElevenLabs is tried first and Groq is the fallback | Free tier |
 
 ### Does it work in cloud Claude Code or the official Claude app?
 
@@ -39,7 +42,7 @@ The calling service (the plugin program that dials and carries the audio, not yo
 
 - **VPS + Claude Code**: the easiest path; the steps below are close to one-click.
 - **Your own computer**: needs some adapting for your OS (Windows / macOS / Linux); see the platform notes in `docs/`.
-- **Cloud Claude Code or the official app**: needs a change to the current setup. The plugin is an MCP server, so switch it from local (stdio) to HTTPS, keep the calling service on your VPS or computer, and expose it through a Cloudflare Tunnel. Your cloud AI can then connect to it as a remote connector and place calls. If you need it now, your AI can make this change following that idea. v0.2.0 ships this version, see "HTTPS remote MCP with OAuth" below; a one-click installer is still planned.
+- **Cloud Claude Code or the official apps and websites**: use the v0.2.0 HTTPS remote version (see "HTTPS remote MCP with OAuth" below). The calling service still runs on your VPS or computer; a Cloudflare Tunnel gives it an https address, and your cloud AI connects to it as a remote connector to place calls. For now it is configured by hand; a one-click installer is planned.
 
 ## Installation
 
@@ -50,7 +53,7 @@ The calling service (the plugin program that dials and carries the audio, not yo
 /plugin install ringringring@ringringring
 ```
 
-During installation, fill in the SIP account, password and speech recognition key when prompted (if there is no prompt, run `/plugin configure ringringring@ringringring`). On first start the plugin downloads and installs its runtime by itself (about 15 seconds in our test); no script needs to be run by hand. If the server is missing system packages, the plugin fails to start and prints a `sudo apt-get install …` command; run it, then reconnect in `/mcp`.
+During installation, fill in the SIP account, password and speech recognition key when prompted (if there is no prompt, run `/plugin configure ringringring@ringringring`). The key field in the prompt is for Groq; to use ElevenLabs, put `VOICE_STT_11LABS_KEY` in `~/.config/ringringring/voice.env` (see "Configuration"). On first start the plugin downloads and installs its runtime by itself (about 15 seconds in our test); no script needs to be run by hand. If the server is missing system packages, the plugin fails to start and prints a `sudo apt-get install …` command; run it, then reconnect in `/mcp`.
 
 **Option 2: manual installation**
 
@@ -66,15 +69,16 @@ With either option, the install directory is `~/.local/share/ringringring` and t
 
 ### Configuration
 
-When installed as a plugin, fill these in at the installation prompts. Alternatively, edit `~/.config/ringringring/voice.env` and fill in at least the following (values already set in the plugin settings take precedence):
+When installed as a plugin, fill these in at the installation prompts. Alternatively, edit `~/.config/ringringring/voice.env` (values already set in the plugin settings take precedence). The three SIP lines are required, plus at least one speech recognition key:
 
 ```bash
-export VOICE_SIP_ID="sip:<AI account>@sip.linphone.org"
-export VOICE_SIP_USER="<AI account>"
+export VOICE_SIP_ID="sip:<your account>@sip.linphone.org"   # the account logged in on your phone; the AI calls you with it
+export VOICE_SIP_USER="<your account>"
 export VOICE_SIP_PASS="<password>"                   # when configured by hand, credentials are stored only in this file
-export VOICE_SIP_CALLEE="sip:<phone account>@sip.linphone.org"
+# export VOICE_SIP_CALLEE="sip:<other account>@sip.linphone.org"  # optional: only to call a different address; defaults to VOICE_SIP_ID
 export VOICE_DISPLAY_NAME="Claude"                   # caller ID name (some phones don't show emoji)
-export VOICE_STT_KEY="<Groq key>"                    # or point VOICE_STT_ENV_FILE at a separate file
+export VOICE_STT_11LABS_KEY="<ElevenLabs key>"       # recommended; or point VOICE_STT_11LABS_ENV_FILE at a separate file
+export VOICE_STT_KEY="<Groq key>"                    # optional fallback if ElevenLabs fails; or use VOICE_STT_ENV_FILE
 export VOICE_STT_LANG="zh"
 export VOICE_STUN="stun.linphone.org:3478"            # lets audio cross NAT; the plugin fills this in by default
 ```
@@ -99,10 +103,10 @@ Configure `plugin-native/bin/run-voice-native.sh` as a stdio MCP server. If the 
 
 ## Swapping speech recognition and speech synthesis
 
-**Speech recognition (STT)**: any service compatible with the OpenAI `/audio/transcriptions` API is supported.
+**Speech recognition (STT)**: ElevenLabs is recommended, see "Speech recognition: recommendation and our setup" below. The fallback layer accepts any service compatible with the OpenAI `/audio/transcriptions` API:
 
 ```bash
-# Default: Groq
+# Default address: Groq
 export VOICE_STT_URL="https://api.groq.com/openai/v1/audio/transcriptions"
 export VOICE_STT_MODEL="whisper-large-v3-turbo"
 # OpenAI:
@@ -149,28 +153,26 @@ Lets the AI stay silent on a call and only listen to your side. With `VOICE_QUIE
 
 All of these default to off. Because they record continuously, decide for yourself whether to turn them on.
 
-### ElevenLabs Scribe and hearing modes
-
-Besides the default Groq / OpenAI-compatible endpoint, speech recognition can use ElevenLabs Scribe (`VOICE_STT_11LABS_KEY` or `VOICE_STT_11LABS_ENV_FILE`; batch and realtime streaming variants, see `voice.env.example`). Without a key this layer is not used.
+### Hearing modes (text / raw audio)
 
 `VOICE_STT_MODE` has three hearing modes: `text` gives the AI a transcript only (default); `audio` attaches your raw voice and gives no text; `both` gives both. The AI can pick one for a whole call with `dial(hear=...)` and change it mid-call with `set_hearing`. If your AI cannot take audio input, use `text`.
 
 ### Speech recognition: recommendation and our setup
 
-We recommend ElevenLabs for speech recognition: the free plan gives 10,000 credits a month, which is plenty for phone transcription, and it is very accurate.
+We recommend ElevenLabs for speech recognition: the free plan gives 10,000 credits a month, which is plenty for phone transcription, and it is very accurate. Set `VOICE_STT_11LABS_KEY` (or `VOICE_STT_11LABS_ENV_FILE`); batch and realtime streaming variants are described in `voice.env.example`.
 
 The author runs three layers, each one used only if the one before fails:
 1. ElevenLabs Scribe (code default `scribe_v2`; the language code is ISO-639-3, so Chinese is `zho`, not `zh`)
 2. Groq `whisper-large-v3-turbo`
 3. Local whisper.cpp: the default model is an English-only `.en` model. It keeps turn-taking working but **cannot really transcribe Chinese**, so treat it as a last resort.
 
-You can run just one layer: a Groq key alone or an ElevenLabs key alone both work; with neither, only the local layer runs.
+An ElevenLabs key alone or a Groq key alone both work. With neither, only local whisper.cpp is left: the plugin does not install it, so you would need to install whisper.cpp and a model yourself, and the default model cannot transcribe Chinese. Not recommended.
 
 ### HTTPS remote MCP with OAuth
 
 Works with the Claude, Gemini and ChatGPT apps and websites.
 
-For AIs that can only use HTTPS remote connectors, such as the Gemini web app or ChatGPT: `plugin-inbound/bin/run_remote.sh` (that is, `remote_http.py`) serves `dial`, `talk`, `quiet_listen` and `hang_up` as a remote MCP on your own host. It is dial-out only (no answering) and returns text only, never raw audio. Authentication is OAuth (dynamic client registration, PKCE, plus a "connection passphrase" page where you type the passphrase you chose).
+For AIs that can only use HTTPS remote connectors, such as cloud Claude Code or the official apps and websites: `plugin-inbound/bin/run_remote.sh` (that is, `remote_http.py`) serves `dial`, `talk`, `quiet_listen` and `hang_up` as a remote MCP on your own host. It is dial-out only (no answering) and returns text only, never raw audio. Authentication is OAuth (dynamic client registration, PKCE, plus a "connection passphrase" page where you type the passphrase you chose).
 
 Setup: keep the service on `127.0.0.1` and forward a domain to it with a Cloudflare Tunnel (or any HTTPS reverse proxy); set `MCP_OAUTH_ENABLED=1`, `MCP_OAUTH_ISSUER_URL`, `MCP_OAUTH_CONNECT_SECRET` (the passphrase, keep it secret) and optionally `MCP_ALLOWED_HOSTS`. OAuth tokens are stored under `~/.local/share/ringringring/oauth/` by default. Without OAuth the service refuses to listen on anything but loopback. A one-click installer is planned; for now this is manual.
 
@@ -200,9 +202,9 @@ If the AI cannot hear very quiet sounds on your side (breathing, muttering), tur
 | Returns LINE BUSY | Another AI entry point on the same host is on a call; no need to redial |
 | Transcription slow or empty | Check the STT key and quota |
 | Names and proper nouns misrecognized | A known limitation of the free model; you can swap the STT service |
-| Running on a Mac | Not a one-click install: on Apple Silicon see [docs/SETUP_MACOS.md](docs/SETUP_MACOS.md), or use Docker ([docs/SETUP_DOCKER.md](docs/SETUP_DOCKER.md)); a user has it running on a Mac mini. The prebuilt package in Releases is Linux x86_64 only |
+| Running on a Mac | Not a one-click install: on Apple Silicon see [docs/SETUP_MACOS.md](docs/SETUP_MACOS.md), or use Docker ([docs/SETUP_DOCKER.md](docs/SETUP_DOCKER.md)); a user has it running on a Mac mini. Note that the Docker image in this repo is still the upstream version and does not include the v0.2.0 features; an update is planned. The prebuilt package in Releases is Linux x86_64 only |
 | libInit fails with 259804 on a Mac (SRTP init) | flat_namespace binds OpenSSL symbols to the system LibreSSL; use Docker, or build the SWIG bindings with `-std=c++11`. Don't disable SRTP, or the other side returns 488 |
-| Does it work with a self-built frontend? | If the frontend's backend runs Claude Code or similar on a VPS, installing this plugin there should work (untested); if the frontend supports remote MCP, you can add it directly once the remote version is ready. The calling service still has to run on a VPS or your own computer |
+| Does it work with a self-built frontend? | If the frontend's backend runs Claude Code or similar on a VPS, installing this plugin there should work (untested); if the frontend supports remote MCP, you can add the HTTPS remote version directly (see above). The calling service still has to run on a VPS or your own computer |
 
 ### If you write or change the pjsua2 config yourself
 
