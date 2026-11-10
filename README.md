@@ -30,7 +30,7 @@
 |---|---|---|
 | Linux 服务器 | x86_64，Python 3.11；即运行 Claude Code／OpenCode 的主机 | 已有 |
 | Linphone | 手机端 App（App Store／各应用商店） | 免费 |
-| Linphone 账号 ×2 | 手机与 AI 各一个（App 内注册或 subscribe.linphone.org）；AI 账号只需注册，拨出电话时程序只向外拨号、不向服务器登记（要接电话才需要登记，见「接电话」） | 免费 |
+| Linphone 账号 | 1 个必需（手机上用，App 内注册或 subscribe.linphone.org）；第 2 个可选：给 AI 用，你想主动拨给 AI 才需要（见「接电话」） | 免费 |
 | Groq API key | 语音识别（console.groq.com） | 免费额度 |
 
 ### 云端 CC／官方 App 能用吗

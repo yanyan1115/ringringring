@@ -30,7 +30,7 @@ If this helps you, a Star would mean a lot to the author ⭐
 |---|---|---|
 | Linux server | x86_64, Python 3.11; the host that runs Claude Code / OpenCode | Already have |
 | Linphone | Phone app (App Store / app stores) | Free |
-| Linphone accounts ×2 | One for the phone, one for the AI (register in the app or at subscribe.linphone.org); the AI account only needs to exist, for outgoing calls the program only dials out and never registers with the server (receiving calls does require registering, see "Incoming calls") | Free |
+| Linphone account | 1 required (for your phone; register in the app or at subscribe.linphone.org); a 2nd one for the AI is optional, needed only if you want to call the AI yourself (see "Incoming calls") | Free |
 | Groq API key | Speech recognition (console.groq.com) | Free tier |
 
 ### Does it work in cloud Claude Code or the official Claude app?
