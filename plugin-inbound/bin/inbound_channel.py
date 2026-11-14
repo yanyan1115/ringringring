@@ -42,6 +42,10 @@ in_call = False
 dialing = False
 _lock_fd = None
 _old_calls = []          # keep Call objects alive; never destroy them inside a pjsua callback
+connected_at = 0.0       # when audio connected; used for the call duration, reset after logging
+call_dir = ""            # "in" | "out", set when the call connects
+call_via = ""            # source passed to dial (e.g. "wechat"), written to the call log; reset at hang-up
+CALL_LOG = os.environ.get("RINGRINGRING_CALL_LOG") or "~/.local/state/ringringring/calls.jsonl"
 
 
 def log(msg):
@@ -53,6 +57,22 @@ def log(msg):
             f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} [ringringring] {msg}\n")
     except (KeyError, OSError):
         pass
+
+
+def _record_call(direction, answered, seconds, via=""):
+    """Append one JSON line to the call log (four fields, plus via if dial passed one; no numbers or addresses). A write failure is only logged and never affects the call."""
+    try:
+        path = os.path.expanduser(CALL_LOG)
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        row = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "dir": direction,
+               "answered": bool(answered), "seconds": int(seconds)}
+        if via:
+            row["via"] = via
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
+    except Exception as e:
+        log(f"call log failed: {type(e).__name__}")
 
 
 def send(obj):
@@ -206,7 +226,7 @@ def start_sip():
 
 def watchdog():
     """The caller hung up first / rang too long / the call dropped: clear state and release the line."""
-    global pending_since, in_call
+    global pending_since, in_call, connected_at, call_dir, call_via
     registered = False
     while True:
         time.sleep(1)
@@ -221,6 +241,7 @@ def watchdog():
                 pending_since = 0.0
                 line_release()
                 log("caller hung up before answer")
+                _record_call("in", False, 0)
                 emit("The user called but hung up before you answered.", {"event": "missed_call", "caller": "user"})
             elif time.time() - pending_since > RING_TIMEOUT:
                 pending_since = 0.0
@@ -232,8 +253,14 @@ def watchdog():
                     log(f"timeout reject failed: {type(e).__name__}")
                 line_release()
                 log("ring timeout")
+                _record_call("in", False, 0)
         elif in_call and s.disconnected:
             in_call = False
+            # dropped before audio connected ([NO MEDIA] etc.) is logged as not answered
+            _record_call(call_dir, bool(connected_at), round(time.time() - connected_at) if connected_at else 0, call_via)
+            connected_at = 0.0
+            call_via = ""
+            call_dir = "in"
             s._bg_stop()
             line_release()
 
@@ -241,7 +268,7 @@ def watchdog():
 # ---------------------------------------------------------------- tools
 
 def tool_answer(args):
-    global pending_since, in_call
+    global pending_since, in_call, connected_at, call_dir
     s = session
     if s is None or not pending_since or s.disconnected:
         return "[NO INCOMING CALL] - nothing is ringing right now (the caller may have hung up)."
@@ -251,10 +278,13 @@ def tool_answer(args):
     s.call.answer(op)
     pending_since = 0.0
     in_call = True
+    call_dir = "in"
     end = time.time() + 10
     while time.time() < end:
         time.sleep(0.1)
         if s.connected and s.aud is not None:
+            connected_at = time.time()
+            call_dir = "in"
             time.sleep(0.4)
             s.noise_floor = s._measure_rms(0.6)
             if not voice_agent.USE_GROQ:
@@ -298,7 +328,7 @@ def _set_caller_name(name):
 
 
 def tool_dial(args, on_connected=None):
-    global in_call, dialing
+    global in_call, dialing, connected_at, call_dir, call_via
     s = session
     if s is None:
         return "[NOT CONFIGURED]"
@@ -311,9 +341,13 @@ def tool_dial(args, on_connected=None):
         s.log = []
         _set_hear(args.get("hear"))
         _set_caller_name(args.get("caller_name") or voice_agent.SIP_DISPLAY_NAME)
+        via = "".join(c for c in str(args.get("via") or "") if c.isalnum() or c in "-_")[:32]
         placed = s.place_call(callee=USER_ID)
         if placed:
             in_call = True
+            connected_at = time.time()
+            call_dir = "out"
+            call_via = via
             if on_connected is not None:     # remote build: start whole-call recording once connected
                 try:
                     on_connected()
@@ -324,6 +358,7 @@ def tool_dial(args, on_connected=None):
         if not in_call:
             line_release()
     if not placed:
+        _record_call("out", False, 0, via)
         return "[NO ANSWER] - no pickup; do not redial in a loop."
     return _format_turn(s.speak_interruptible(args["opening_line"]))
 
@@ -380,9 +415,11 @@ TOOLS = {
     "dial": (tool_dial, "Call the user from this machine's SIP account (rings, says the opening line once picked up, returns the reply), then use talk / hang_up. Keep it short. "
              "caller_name = the name shown on the user's phone for this call only; defaults to the configured display name. "
              "hear = how to hear the user for the whole call: text (transcript) / audio (raw audio) / both; defaults to the server setting. "
-             "Choose text if you cannot take audio input.",
+             "Choose text if you cannot take audio input. "
+             "via = where the request for this call came from, e.g. wechat when the user asked for the call in WeChat or you are reporting a job sent from WeChat (with ringbot this makes a call-duration bubble appear in WeChat); leave it out otherwise.",
              {"opening_line": {"type": "string"}, "caller_name": {"type": "string"},
-              "hear": {"type": "string", "enum": ["text", "audio", "both"]}}, ["opening_line"]),
+              "hear": {"type": "string", "enum": ["text", "audio", "both"]},
+              "via": {"type": "string"}}, ["opening_line"]),
     "talk": (tool_talk, "Say one sentence on the call and listen for the reply; the caller can interrupt. If it returns [CALL ENDED], call hang_up.",
              {"text": {"type": "string"}}, ["text"]),
     "quiet_listen": (tool_quiet_listen,

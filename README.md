@@ -141,6 +141,8 @@ export VOICE_TTS="edge"
 
 **两道身份检查**：任何人知道 SIP 地址都能打，来电显示也能伪造，所以来电要同时通过：① 来电的 `用户名@域名` 必须和 `VOICE_SIP_ID` 完全一致；② 来电设备必须在 `~/.config/ringringring/trusted_devices` 里（每行一个 Linphone 设备 id 的哈希，只存 sha256 前缀，每次来电现读，改了不用重连）。没通过的直接回忙线，不会叫醒 AI。名单为空时**不拦任何人**，只在日志里写下 `device=<哈希> (not enforced)`，让你把自己的设备哈希抄进名单；也就是说名单为空时只认 SIP 地址，是可以被伪造的，请填好名单。设备 id 不是密码学证明，通话里不要说密钥之类的隐私。
 
+**通话记录**：来电插件每通电话结束后往 `RINGRINGRING_CALL_LOG`（默认 `~/.local/state/ringringring/calls.jsonl`，权限 600）追加一行 `{"at","dir","answered","seconds"}`，不含号码和地址；AI 调 `dial` 时传了 `via`（如 `"wechat"`）就再多一个 `"via"` 字段。别的程序可以读它，比如 [ringbot](https://github.com/yanyan1115/ringbot) 用它在微信里发「通话时长」气泡。
+
 **打电话前先等几秒**：刚切回 Linphone 时它还没连好，第一个邀请里没有设备 id（日志里是 `device=none`），会被拒绝，表现为响一声就断；等几秒再拨即可。重装 Linphone 会换设备 id，需要重新加入名单。
 
 ### 安静听、等声音、有声就推（默认关）

@@ -141,6 +141,8 @@ Install the main ringringring plugin first (it provides pjsua2 and the engine co
 
 **Two identity checks.** Anyone who knows a SIP address can call it, and caller ID can be spoofed, so an incoming call has to pass both: (1) the caller's `user@host` must match `VOICE_SIP_ID` exactly; (2) the caller's device must be listed in `~/.config/ringringring/trusted_devices` (one hashed Linphone device id per line, only a sha256 prefix is stored, read on every call so edits need no reconnect). Calls that fail either check get a busy tone and never wake the AI. While the list is empty **nothing is blocked**: the log just shows `device=<hash> (not enforced)` so you can copy your own hash into the list. In other words, with an empty list only the SIP address is checked, and that can be spoofed, so please fill the list in. A device id is not cryptographic proof, so do not say keys or other private details on a call.
 
+**Call log.** After every call the incoming-call plugin appends one line `{"at","dir","answered","seconds"}` to `RINGRINGRING_CALL_LOG` (default `~/.local/state/ringringring/calls.jsonl`, mode 600), with no numbers or addresses; if the AI passed `via` to `dial` (e.g. `"wechat"`) the line also gets a `"via"` field. Other programs can read it: [ringbot](https://github.com/yanyan1115/ringbot) uses it to post a call-duration bubble in WeChat.
+
 **Wait a few seconds before dialing.** Right after you switch back to Linphone it has not finished connecting, so the first INVITE carries no device id (`device=none` in the log) and is rejected: it rings once and drops. Wait a few seconds and dial again. Reinstalling Linphone changes the device id, so add the new one to the list.
 
 ### Quiet listen, wait for voice, push on voice (off by default)
